@@ -1,0 +1,7 @@
+{
+  "venvPath": "D:/Anaconda/envs",
+  "venv": "int",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": "none"
+}
+

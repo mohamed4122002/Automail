@@ -1,0 +1,12 @@
+node_modules
+frontend/node_modules
+backend/__pycache__
+*.pyc
+.git
+.env
+dist
+frontend/dist
+backend_logs.txt
+logs.txt
+full_logs.txt
+backend_full_logs.txt
