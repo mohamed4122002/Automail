@@ -1,5 +1,5 @@
 """
-Declarative workflow condition engine.
+Declarative workflow condition engine using Beanie ODM.
 
 Conditions are stored as JSON on workflow nodes or edges and interpreted at runtime.
 Supported condition types (extensible via the registry below):
@@ -15,11 +15,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict
+from uuid import UUID
 
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from .models import Event, LeadScore
+from .models import Event, LeadScore, EmailSend, EmailRetryAttempt
 
 
 ConditionContext = Dict[str, Any]
@@ -28,13 +26,12 @@ ConditionContext = Dict[str, Any]
 @dataclass
 class ConditionResult:
     """Structured result of a condition evaluation."""
-
     passed: bool
     details: Dict[str, Any]
 
 
 async def _event_check(
-    db: AsyncSession, user_id: str, condition: Dict[str, Any], ctx: ConditionContext
+    user_id: str, condition: Dict[str, Any], ctx: ConditionContext
 ) -> ConditionResult:
     """
     Check if a specific event type occurred within N hours.
@@ -46,7 +43,6 @@ async def _event_check(
       "within_hours": 48
     }
     """
-
     event_type = condition.get("event")
     within_hours = int(condition.get("within_hours", 0))
     if not event_type or within_hours <= 0:
@@ -59,16 +55,13 @@ async def _event_check(
         )
 
     since = datetime.utcnow() - timedelta(hours=within_hours)
-    q = await db.execute(
-        sa.select(sa.func.count())
-        .select_from(Event)
-        .where(
-            Event.user_id == user_id,
-            Event.type == event_type,
-            Event.created_at >= since,
-        )
-    )
-    count = int(q.scalar_one())
+    
+    count = await Event.find(
+        Event.user_id == UUID(user_id),
+        Event.type == event_type,
+        Event.created_at >= since
+    ).count()
+    
     return ConditionResult(
         passed=count > 0,
         details={
@@ -80,7 +73,7 @@ async def _event_check(
 
 
 async def _event_count(
-    db: AsyncSession, user_id: str, condition: Dict[str, Any], ctx: ConditionContext
+    user_id: str, condition: Dict[str, Any], ctx: ConditionContext
 ) -> ConditionResult:
     """
     Check if count of events satisfies a comparison.
@@ -94,7 +87,6 @@ async def _event_count(
       "within_hours": 72   # optional
     }
     """
-
     event_type = condition.get("event")
     op = str(condition.get("op", "=="))
     target = int(condition.get("count", 0))
@@ -106,16 +98,12 @@ async def _event_count(
             details={"reason": "invalid_condition", "message": "event missing"},
         )
 
-    filters = [Event.user_id == user_id, Event.type == event_type]
+    filters = [Event.user_id == UUID(user_id), Event.type == event_type]
     if within_hours is not None:
-        hours = int(within_hours)
-        since = datetime.utcnow() - timedelta(hours=hours)
+        since = datetime.utcnow() - timedelta(hours=int(within_hours))
         filters.append(Event.created_at >= since)
 
-    q = await db.execute(
-        sa.select(sa.func.count()).select_from(Event).where(*filters)
-    )
-    count = int(q.scalar_one())
+    count = await Event.find(*filters).count()
 
     ops: Dict[str, Callable[[int, int], bool]] = {
         "==": lambda a, b: a == b,
@@ -140,19 +128,11 @@ async def _event_count(
 
 
 async def _no_event(
-    db: AsyncSession, user_id: str, condition: Dict[str, Any], ctx: ConditionContext
+    user_id: str, condition: Dict[str, Any], ctx: ConditionContext
 ) -> ConditionResult:
     """
     Pass if NO events of a given type exist in a time window.
-
-    JSON shape:
-    {
-      "type": "no_event",
-      "event": "opened",
-      "within_hours": 48
-    }
     """
-
     event_type = condition.get("event")
     within_hours = int(condition.get("within_hours", 0))
     if not event_type or within_hours <= 0:
@@ -165,16 +145,13 @@ async def _no_event(
         )
 
     since = datetime.utcnow() - timedelta(hours=within_hours)
-    q = await db.execute(
-        sa.select(sa.func.count())
-        .select_from(Event)
-        .where(
-            Event.user_id == user_id,
-            Event.type == event_type,
-            Event.created_at >= since,
-        )
-    )
-    count = int(q.scalar_one())
+    
+    count = await Event.find(
+        Event.user_id == UUID(user_id),
+        Event.type == event_type,
+        Event.created_at >= since
+    ).count()
+    
     return ConditionResult(
         passed=count == 0,
         details={
@@ -186,26 +163,16 @@ async def _no_event(
 
 
 async def _lead_score_threshold(
-    db: AsyncSession, user_id: str, condition: Dict[str, Any], ctx: ConditionContext
+    user_id: str, condition: Dict[str, Any], ctx: ConditionContext
 ) -> ConditionResult:
     """
     Compare lead score to a threshold.
-
-    JSON shape:
-    {
-      "type": "lead_score_threshold",
-      "op": ">=",
-      "score": 50
-    }
     """
-
     op = str(condition.get("op", ">="))
     target = int(condition.get("score", 0))
 
-    q = await db.execute(
-        sa.select(LeadScore.score).where(LeadScore.user_id == user_id)
-    )
-    score = int(q.scalar_one_or_none() or 0)
+    lead_score_doc = await LeadScore.find_one(LeadScore.user_id == UUID(user_id))
+    score = lead_score_doc.score if lead_score_doc else 0
 
     ops: Dict[str, Callable[[int, int], bool]] = {
         "==": lambda a, b: a == b,
@@ -224,34 +191,24 @@ async def _lead_score_threshold(
 
 
 async def _last_activity_days(
-    db: AsyncSession, user_id: str, condition: Dict[str, Any], ctx: ConditionContext
+    user_id: str, condition: Dict[str, Any], ctx: ConditionContext
 ) -> ConditionResult:
     """
     Check if last activity is within/outside a number of days.
-
-    JSON shape:
-    {
-      "type": "last_activity_days",
-      "op": "<=",
-      "days": 7
-    }
     """
-
     op = str(condition.get("op", "<="))
     days = int(condition.get("days", 0))
 
-    q = await db.execute(
-        sa.select(sa.func.max(Event.created_at)).where(Event.user_id == user_id)
-    )
-    last_ts = q.scalar_one_or_none()
-    if last_ts is None:
+    last_event = await Event.find(Event.user_id == UUID(user_id)).sort("-created_at").limit(1).first_or_none()
+    
+    if last_event is None:
         # No activity at all; treat as very old
         return ConditionResult(
-            passed=op in {">", ">="},  # "older than N days" style checks
+            passed=op in {">", ">="},
             details={"last_activity": None, "days": days},
         )
 
-    delta_days = (datetime.utcnow() - last_ts).days
+    delta_days = (datetime.utcnow() - last_event.created_at).days
     ops: Dict[str, Callable[[int, int], bool]] = {
         "==": lambda a, b: a == b,
         ">=": lambda a, b: a >= b,
@@ -269,38 +226,21 @@ async def _last_activity_days(
 
 
 async def _email_not_opened_after_hours(
-    db: AsyncSession, user_id: str, condition: Dict[str, Any], ctx: ConditionContext
+    user_id: str, condition: Dict[str, Any], ctx: ConditionContext
 ) -> ConditionResult:
     """
     Check if an email was sent but NOT opened within N hours.
     This is the core condition for the Non-Responder retry logic.
-
-    JSON shape:
-    {
-      "type": "email_not_opened_after_hours",
-      "hours": 48,
-      "email_send_id": "uuid"  # optional, checks specific email
-    }
     """
-    
     hours = int(condition.get("hours", 48))
     email_send_id = condition.get("email_send_id")
     
-    # Check if email was sent
-    from .models import EmailSend, Event
-    
-    filters = [EmailSend.user_id == user_id, EmailSend.status == "sent"]
+    filters = [EmailSend.user_id == UUID(user_id), EmailSend.status == "sent"]
     if email_send_id:
-        filters.append(EmailSend.id == email_send_id)
+        filters.append(EmailSend.id == UUID(email_send_id))
     
     # Get the most recent sent email
-    q_send = await db.execute(
-        sa.select(EmailSend)
-        .where(*filters)
-        .order_by(EmailSend.created_at.desc())
-        .limit(1)
-    )
-    email_send = q_send.scalar_one_or_none()
+    email_send = await EmailSend.find(*filters).sort("-created_at").limit(1).first_or_none()
     
     if not email_send:
         return ConditionResult(
@@ -320,19 +260,12 @@ async def _email_not_opened_after_hours(
             }
         )
     
-    # Check if user opened the email
-    q_opened = await db.execute(
-        sa.select(sa.func.count())
-        .select_from(Event)
-        .where(
-            Event.user_id == user_id,
-            Event.email_send_id == email_send.id,
-            Event.type == "opened"
-        )
-    )
-    opened_count = int(q_opened.scalar_one())
+    opened_count = await Event.find(
+        Event.user_id == UUID(user_id),
+        Event.email_send_id == email_send.id,
+        Event.type == "opened"
+    ).count()
     
-    # Pass if email was NOT opened
     passed = opened_count == 0
     
     return ConditionResult(
@@ -347,36 +280,20 @@ async def _email_not_opened_after_hours(
 
 
 async def _retry_attempt_count(
-    db: AsyncSession, user_id: str, condition: Dict[str, Any], ctx: ConditionContext
+    user_id: str, condition: Dict[str, Any], ctx: ConditionContext
 ) -> ConditionResult:
     """
     Check how many retry attempts have been made for a user/campaign.
-
-    JSON shape:
-    {
-      "type": "retry_attempt_count",
-      "op": "<",
-      "count": 3,
-      "campaign_id": "uuid"  # optional
-    }
     """
-    
-    from .models import EmailRetryAttempt
-    
     op = str(condition.get("op", "<"))
     target = int(condition.get("count", 3))
     campaign_id = condition.get("campaign_id")
     
-    filters = [EmailRetryAttempt.user_id == user_id, EmailRetryAttempt.status == "sent"]
+    filters = [EmailRetryAttempt.user_id == UUID(user_id), EmailRetryAttempt.status == "sent"]
     if campaign_id:
-        filters.append(EmailRetryAttempt.campaign_id == campaign_id)
+        filters.append(EmailRetryAttempt.campaign_id == UUID(campaign_id))
     
-    q = await db.execute(
-        sa.select(sa.func.count())
-        .select_from(EmailRetryAttempt)
-        .where(*filters)
-    )
-    count = int(q.scalar_one())
+    count = await EmailRetryAttempt.find(*filters).count()
     
     ops: Dict[str, Callable[[int, int], bool]] = {
         "==": lambda a, b: a == b,
@@ -399,45 +316,26 @@ async def _retry_attempt_count(
 
 
 async def _opened_no_click(
-    db: AsyncSession, user_id: str, condition: Dict[str, Any], ctx: ConditionContext
+    user_id: str, condition: Dict[str, Any], ctx: ConditionContext
 ) -> ConditionResult:
     """
     Check if a user has opened an email but NOT clicked any links.
     Useful for Path 2 transitions.
-
-    JSON shape:
-    {
-      "type": "opened_no_click",
-      "within_hours": 48
-    }
     """
-    
     within_hours = int(condition.get("within_hours", 48))
     since = datetime.utcnow() - timedelta(hours=within_hours)
     
-    # 1. Check for open events
-    q_open = await db.execute(
-        sa.select(sa.func.count())
-        .select_from(Event)
-        .where(
-            Event.user_id == user_id,
-            Event.type == "opened",
-            Event.created_at >= since
-        )
-    )
-    open_count = int(q_open.scalar_one())
+    open_count = await Event.find(
+        Event.user_id == UUID(user_id),
+        Event.type == "opened",
+        Event.created_at >= since
+    ).count()
     
-    # 2. Check for click events
-    q_click = await db.execute(
-        sa.select(sa.func.count())
-        .select_from(Event)
-        .where(
-            Event.user_id == user_id,
-            Event.type == "clicked",
-            Event.created_at >= since
-        )
-    )
-    click_count = int(q_click.scalar_one())
+    click_count = await Event.find(
+        Event.user_id == UUID(user_id),
+        Event.type == "clicked",
+        Event.created_at >= since
+    ).count()
     
     passed = open_count > 0 and click_count == 0
     
@@ -452,7 +350,7 @@ async def _opened_no_click(
 
 
 CONDITION_HANDLERS: Dict[
-    str, Callable[[AsyncSession, str, Dict[str, Any], ConditionContext], Any]
+    str, Callable[[str, Dict[str, Any], ConditionContext], Any]
 ] = {
     "event_check": _event_check,
     "event_count": _event_count,
@@ -466,20 +364,10 @@ CONDITION_HANDLERS: Dict[
 
 
 async def evaluate_condition(
-    db: AsyncSession,
     user_id: str,
     condition: Dict[str, Any],
     ctx: ConditionContext | None = None,
 ) -> ConditionResult:
-    """
-    Evaluate a JSON condition for a user.
-
-    The `condition` dict must include `"type"` which is resolved via
-    `CONDITION_HANDLERS`. Adding new condition types only requires:
-      - Implementing a handler with the same signature as the others.
-      - Registering it in `CONDITION_HANDLERS`.
-    """
-
     import logging
     logger = logging.getLogger(__name__)
 
@@ -498,13 +386,11 @@ async def evaluate_condition(
         )
     
     # Execute handler
-    result = await handler(db, user_id, condition, ctx)
+    result = await handler(user_id, condition, ctx)
     
-    # Log result for debugging
     logger.info(
         f"Condition Evaluation: type={cond_type}, user={user_id}, "
         f"passed={result.passed}, details={result.details}"
     )
     
     return result
-

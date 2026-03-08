@@ -1,16 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from uuid import UUID
 
-from ..db import get_db
 from ..services.settings import SettingsService
 from ..schemas.settings import (
     SettingResponse, 
     SettingUpdate, 
     EmailProviderConfig,
     SystemPreferences,
-    WorkflowPreferences
+    WorkflowPreferences,
+    CRMPreferences
 )
 from ..api.deps import get_current_user_id
 
@@ -18,11 +17,10 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 @router.get("/", response_model=list[SettingResponse])
 async def list_settings(
-    category: Optional[str] = None,
-    db: AsyncSession = Depends(get_db)
+    category: Optional[str] = None
 ):
     """Get all settings, optionally filtered by category."""
-    service = SettingsService(db)
+    service = SettingsService()
     
     if category:
         settings = await service.get_settings_by_category(category)
@@ -32,9 +30,9 @@ async def list_settings(
     return settings
 
 @router.get("/{key}", response_model=SettingResponse)
-async def get_setting(key: str, db: AsyncSession = Depends(get_db)):
+async def get_setting(key: str):
     """Get a specific setting by key."""
-    service = SettingsService(db)
+    service = SettingsService()
     setting = await service.get_setting(key)
     
     if not setting:
@@ -46,11 +44,10 @@ async def get_setting(key: str, db: AsyncSession = Depends(get_db)):
 async def update_setting(
     key: str,
     update: SettingUpdate,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Update a setting value."""
-    service = SettingsService(db)
+    service = SettingsService()
     
     # Determine if this should be encrypted based on key
     is_encrypted = key in ["email_provider", "api_keys", "smtp_config"]
@@ -68,11 +65,10 @@ async def update_setting(
 @router.post("/email-provider", response_model=SettingResponse)
 async def configure_email_provider(
     config: EmailProviderConfig,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Configure email provider settings."""
-    service = SettingsService(db)
+    service = SettingsService()
     
     setting = await service.create_or_update_setting(
         key="email_provider",
@@ -89,11 +85,10 @@ async def configure_email_provider(
 @router.post("/system-preferences", response_model=SettingResponse)
 async def update_system_preferences(
     prefs: SystemPreferences,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Update system preferences."""
-    service = SettingsService(db)
+    service = SettingsService()
     
     setting = await service.create_or_update_setting(
         key="system_preferences",
@@ -110,11 +105,10 @@ async def update_system_preferences(
 @router.post("/workflow-preferences", response_model=SettingResponse)
 async def update_workflow_preferences(
     prefs: WorkflowPreferences,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Update workflow preferences."""
-    service = SettingsService(db)
+    service = SettingsService()
     
     setting = await service.create_or_update_setting(
         key="workflow_preferences",
@@ -127,10 +121,29 @@ async def update_workflow_preferences(
     
     return setting
 
+@router.post("/crm-preferences", response_model=SettingResponse)
+async def update_crm_preferences(
+    prefs: CRMPreferences,
+    user_id: UUID = Depends(get_current_user_id)
+):
+    """Update CRM preferences."""
+    service = SettingsService()
+    
+    setting = await service.create_or_update_setting(
+        key="crm_preferences",
+        value=prefs.model_dump(),
+        category="crm",
+        is_encrypted=False,
+        description="CRM and pipeline preferences",
+        updated_by_id=user_id
+    )
+    
+    return setting
+
 @router.delete("/{key}")
-async def delete_setting(key: str, db: AsyncSession = Depends(get_db)):
+async def delete_setting(key: str):
     """Delete a setting."""
-    service = SettingsService(db)
+    service = SettingsService()
     deleted = await service.delete_setting(key)
     
     if not deleted:
@@ -138,14 +151,13 @@ async def delete_setting(key: str, db: AsyncSession = Depends(get_db)):
     
     return {"message": "Setting deleted successfully"}
 
-
 @router.post("/email-provider/test")
-async def test_email_provider(db: AsyncSession = Depends(get_db)):
+async def test_email_provider():
     """Test the currently currently configured email provider connection."""
     from ..email_providers import get_email_provider
     
     try:
-        provider = await get_email_provider(db)
+        provider = await get_email_provider()
         is_valid = await provider.test_connection()
         
         if is_valid:
@@ -155,12 +167,8 @@ async def test_email_provider(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Test failed: {str(e)}")
 
-
 @router.post("/email-provider/test-config")
-async def test_email_config(
-    config: dict,
-    db: AsyncSession = Depends(get_db)
-):
+async def test_email_config(config: dict):
     """
     Test email provider configuration before saving.
     Allows testing new configurations without applying them.
@@ -177,17 +185,13 @@ async def test_email_config(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Test failed: {str(e)}")
 
-
 @router.post("/email-provider/send-test-email")
-async def send_test_email(
-    test_email: str,
-    db: AsyncSession = Depends(get_db)
-):
+async def send_test_email(test_email: str):
     """Send a test email to verify configuration."""
     from ..email_providers import get_email_provider
     
     try:
-        provider = await get_email_provider(db)
+        provider = await get_email_provider()
         message_id = await provider.send_email(
             to_email=test_email,
             subject="Test Email from Marketing Automation",

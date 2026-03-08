@@ -30,6 +30,18 @@ celery_app.conf.beat_schedule = {
     "check-unopened-emails": {
         "task": "check_and_retry_unopened_emails", # Ensure this matches task name
         "schedule": crontab(minute="*/30"), # Every 30 mins
+    },
+    "check-lead-inactivity": {
+        "task": "check_lead_inactivity",
+        "schedule": crontab(hour=8, minute=0), # Run every morning at 8 AM
+    },
+    "sync-email-replies": {
+        "task": "sync-email-replies",
+        "schedule": crontab(minute="*/30"), # Every 30 mins
+    },
+    "sync-dashboard-metrics": {
+        "task": "sync_dashboard_metrics",
+        "schedule": crontab(minute="*/5"), # Every 5 mins
     }
 }
 

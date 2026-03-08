@@ -1,6 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 from uuid import UUID
 from pydantic import BaseModel, EmailStr, validator
 from typing import List, Optional, Dict
@@ -9,7 +7,6 @@ import io
 import re
 import dns.resolver
 
-from ..db import get_db
 from ..models import Contact, ContactList, User
 from ..api.deps import get_current_user_id
 
@@ -103,60 +100,45 @@ async def validate_email_dns(email: str) -> tuple[bool, List[str]]:
         return False, warnings
 
 
-async def check_duplicate(db: AsyncSession, email: str, contact_list_id: Optional[UUID] = None) -> bool:
+async def check_duplicate(email: str, contact_list_id: Optional[UUID] = None) -> bool:
     """Check if email already exists in database."""
     
     if contact_list_id:
-        # Check within specific contact list
-        q = await db.execute(
-            select(Contact).where(
-                Contact.email == email.lower(),
-                Contact.contact_list_id == contact_list_id
-            )
+        contact = await Contact.find_one(
+            Contact.email == email.lower(),
+            Contact.contact_list_id == contact_list_id
         )
     else:
-        # Check globally
-        q = await db.execute(
-            select(Contact).where(Contact.email == email.lower())
-        )
+        contact = await Contact.find_one(Contact.email == email.lower())
     
-    return q.scalar_one_or_none() is not None
+    return contact is not None
 
 
 @router.get("/lists")
 async def list_contact_lists(
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """List all contact lists for the current user."""
     
-    q = await db.execute(
-        select(
-            ContactList,
-            func.count(Contact.id).label("contact_count")
-        )
-        .outerjoin(Contact, ContactList.id == Contact.contact_list_id)
-        .where(ContactList.owner_id == user_id)
-        .group_by(ContactList.id)
-    )
-    results = q.all()
+    lists = await ContactList.find(ContactList.owner_id == user_id).to_list()
+    results = []
     
-    return [
-        {
+    for cl in lists:
+        count = await Contact.find(Contact.contact_list_id == cl.id).count()
+        results.append({
             "id": str(cl.id),
             "name": cl.name,
             "description": cl.description,
             "created_at": cl.created_at.isoformat(),
             "contact_count": count
-        }
-        for cl, count in results
-    ]
+        })
+    
+    return results
 
 
 @router.post("/lists", status_code=201)
 async def create_contact_list(
     request: ContactListCreateRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Create a new contact list."""
@@ -167,9 +149,7 @@ async def create_contact_list(
         owner_id=user_id
     )
     
-    db.add(contact_list)
-    await db.commit()
-    await db.refresh(contact_list)
+    await contact_list.insert()
     
     return {
         "id": str(contact_list.id),
@@ -180,8 +160,7 @@ async def create_contact_list(
 
 @router.post("/import/headers")
 async def get_csv_headers(
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db)
+    file: UploadFile = File(...)
 ):
     """Extract headers and first few rows for mapping."""
     import logging
@@ -242,7 +221,6 @@ async def get_csv_headers(
 @router.post("/import/confirm")
 async def confirm_import(
     request: ImportConfirmRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Confirm and execute the import asynchronously."""
@@ -297,15 +275,11 @@ async def get_import_status(task_id: str):
 
 @router.get("/lists/{list_id}/contacts")
 async def get_contacts_in_list(
-    list_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    list_id: UUID
 ):
     """Get all contacts in a specific list."""
     
-    q = await db.execute(
-        select(Contact).where(Contact.contact_list_id == list_id)
-    )
-    contacts = q.scalars().all()
+    contacts = await Contact.find(Contact.contact_list_id == list_id).to_list()
     
     return [
         {

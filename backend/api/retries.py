@@ -1,10 +1,7 @@
+from beanie.operators import In
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 from uuid import UUID
-from datetime import datetime, timedelta
 
-from ..db import get_db
 from ..models import Campaign, EmailSend, EmailRetryAttempt, Event, User
 from ..schemas.retries import RetryConfig, RetryStats, RetryAttemptDetail, ColdLeadResponse
 from ..api.deps import get_current_user_id
@@ -13,69 +10,53 @@ router = APIRouter(prefix="/campaigns", tags=["retries"])
 
 @router.get("/{campaign_id}/retry-stats", response_model=RetryStats)
 async def get_retry_stats(
-    campaign_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    campaign_id: UUID
 ):
     """Get retry statistics for a campaign."""
     
     # Total sent
-    q_sent = await db.execute(
-        select(func.count())
-        .select_from(EmailSend)
-        .where(
-            EmailSend.campaign_id == campaign_id,
-            EmailSend.status == "sent"
-        )
-    )
-    total_sent = q_sent.scalar_one()
+    total_sent = await EmailSend.find(
+        EmailSend.campaign_id == campaign_id,
+        EmailSend.status == "sent"
+    ).count()
     
     # Total unopened (sent but no open event)
-    q_unopened = await db.execute(
-        select(func.count(func.distinct(EmailSend.id)))
-        .select_from(EmailSend)
-        .outerjoin(Event, (Event.email_send_id == EmailSend.id) & (Event.type == "opened"))
-        .where(
-            EmailSend.campaign_id == campaign_id,
-            EmailSend.status == "sent",
-            Event.id == None
-        )
-    )
-    total_unopened = q_unopened.scalar_one()
+    sends = await EmailSend.find(
+        EmailSend.campaign_id == campaign_id,
+        EmailSend.status == "sent"
+    ).to_list()
+    
+    send_ids = [s.id for s in sends]
+    
+    opened_events = await Event.find(
+        In(Event.email_send_id, send_ids),
+        Event.type == "opened"
+    ).to_list()
+    
+    opened_send_ids = {e.email_send_id for e in opened_events}
+    total_unopened = len([s for s in sends if s.id not in opened_send_ids])
     
     # Pending retries
-    q_pending_first = await db.execute(
-        select(func.count())
-        .select_from(EmailRetryAttempt)
-        .where(
-            EmailRetryAttempt.campaign_id == campaign_id,
-            EmailRetryAttempt.attempt_number == 1,
-            EmailRetryAttempt.status == "pending"
-        )
-    )
-    pending_first_retry = q_pending_first.scalar_one()
+    pending_first_retry = await EmailRetryAttempt.find(
+        EmailRetryAttempt.campaign_id == campaign_id,
+        EmailRetryAttempt.attempt_number == 1,
+        EmailRetryAttempt.status == "pending"
+    ).count()
     
-    q_pending_second = await db.execute(
-        select(func.count())
-        .select_from(EmailRetryAttempt)
-        .where(
-            EmailRetryAttempt.campaign_id == campaign_id,
-            EmailRetryAttempt.attempt_number == 2,
-            EmailRetryAttempt.status == "pending"
-        )
-    )
-    pending_second_retry = q_pending_second.scalar_one()
+    pending_second_retry = await EmailRetryAttempt.find(
+        EmailRetryAttempt.campaign_id == campaign_id,
+        EmailRetryAttempt.attempt_number == 2,
+        EmailRetryAttempt.status == "pending"
+    ).count()
     
     # Marked as cold
-    q_cold = await db.execute(
-        select(func.count())
-        .select_from(User)
-        .join(EmailSend, EmailSend.user_id == User.id)
-        .where(
-            EmailSend.campaign_id == campaign_id,
-            User.lead_status == "cold"
-        )
-    )
-    marked_as_cold = q_cold.scalar_one()
+    all_users = await User.find(User.lead_status == "cold").to_list()
+    cold_user_ids = [u.id for u in all_users]
+    
+    marked_as_cold = await EmailSend.find(
+        EmailSend.campaign_id == campaign_id,
+        In(EmailSend.user_id, cold_user_ids)
+    ).count()
     
     return RetryStats(
         total_sent=total_sent,
@@ -90,53 +71,47 @@ async def get_retry_stats(
 async def configure_retries(
     campaign_id: UUID,
     config: RetryConfig,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Update retry configuration for a campaign."""
     
-    q = await db.execute(
-        select(Campaign).where(Campaign.id == campaign_id)
-    )
-    campaign = q.scalar_one_or_none()
+    campaign = await Campaign.find_one(Campaign.id == campaign_id)
     
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
     campaign.retry_config = config.model_dump()
-    await db.commit()
+    await campaign.save()
     
     return {"message": "Retry configuration updated", "config": campaign.retry_config}
 
 
 @router.get("/{campaign_id}/retry-attempts", response_model=list[RetryAttemptDetail])
 async def list_retry_attempts(
-    campaign_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    campaign_id: UUID
 ):
     """List all retry attempts for a campaign."""
     
-    q = await db.execute(
-        select(EmailRetryAttempt, User.email)
-        .join(User, EmailRetryAttempt.user_id == User.id)
-        .where(EmailRetryAttempt.campaign_id == campaign_id)
-        .order_by(EmailRetryAttempt.created_at.desc())
-        .limit(100)
-    )
-    results = q.all()
+    attempts = await EmailRetryAttempt.find(
+        EmailRetryAttempt.campaign_id == campaign_id
+    ).sort("-created_at").limit(100).to_list()
+    
+    user_ids = list(set([a.user_id for a in attempts]))
+    users = await User.find(In(User.id, user_ids)).to_list()
+    user_email_map = {u.id: u.email for u in users}
     
     return [
         RetryAttemptDetail(
             id=attempt.id,
             email_send_id=attempt.email_send_id,
             user_id=attempt.user_id,
-            user_email=email,
+            user_email=user_email_map.get(attempt.user_id, ""),
             attempt_number=attempt.attempt_number,
             scheduled_for=attempt.scheduled_for,
             status=attempt.status,
             created_at=attempt.created_at
         )
-        for attempt, email in results
+        for attempt in attempts
     ]
 
 
@@ -144,20 +119,23 @@ async def list_retry_attempts(
 cold_leads_router = APIRouter(prefix="/users", tags=["cold-leads"])
 
 @cold_leads_router.get("/cold-leads", response_model=list[ColdLeadResponse])
-async def get_cold_leads(
-    db: AsyncSession = Depends(get_db)
-):
+async def get_cold_leads():
     """Get all users marked as cold leads."""
     
-    q = await db.execute(
-        select(User, func.max(EmailSend.created_at), func.count(EmailRetryAttempt.id))
-        .outerjoin(EmailSend, EmailSend.user_id == User.id)
-        .outerjoin(EmailRetryAttempt, EmailRetryAttempt.user_id == User.id)
-        .where(User.lead_status == "cold")
-        .group_by(User.id)
-        .order_by(User.updated_at.desc())
-    )
-    results = q.all()
+    cold_users = await User.find(User.lead_status == "cold").sort("-updated_at").to_list()
+    user_ids = [u.id for u in cold_users]
+    
+    sends = await EmailSend.find(In(EmailSend.user_id, user_ids)).to_list()
+    retries = await EmailRetryAttempt.find(In(EmailRetryAttempt.user_id, user_ids)).to_list()
+    
+    last_send_map = {}
+    for s in sends:
+        if s.user_id not in last_send_map or s.created_at > last_send_map[s.user_id]:
+            last_send_map[s.user_id] = s.created_at
+            
+    retry_count_map = {}
+    for r in retries:
+        retry_count_map[r.user_id] = retry_count_map.get(r.user_id, 0) + 1
     
     return [
         ColdLeadResponse(
@@ -165,9 +143,9 @@ async def get_cold_leads(
             email=user.email,
             first_name=user.first_name,
             last_name=user.last_name,
-            last_email_sent=last_sent or user.created_at,
-            retry_attempts=retry_count or 0,
+            last_email_sent=last_send_map.get(user.id, user.created_at),
+            retry_attempts=retry_count_map.get(user.id, 0),
             marked_cold_at=user.updated_at
         )
-        for user, last_sent, retry_count in results
+        for user in cold_users
     ]

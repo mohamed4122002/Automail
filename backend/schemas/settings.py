@@ -51,3 +51,7 @@ class WorkflowPreferences(BaseModel):
     max_retry_attempts: int = 3
     execution_start_hour: int = 9
     execution_end_hour: int = 17
+
+class CRMPreferences(BaseModel):
+    inactivity_threshold_days: int = 3
+    enable_inactivity_alerts: bool = True

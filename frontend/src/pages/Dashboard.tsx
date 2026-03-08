@@ -2,19 +2,22 @@ import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import Layout from "../components/layout/Layout";
 import { StatsCard } from "../components/ui/StatsCard";
+import { Button } from "../components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { LiveActivityFeed } from "../components/dashboard/LiveActivityFeed";
 import { EmailQueueWidget } from "../components/dashboard/EmailQueueWidget";
 import { ABTestingWidget } from "../components/dashboard/ABTestingWidget";
 import { ReputationWidget } from "../components/dashboard/ReputationWidget";
-import { InfrastructureWidget } from "../components/dashboard/InfrastructureWidget";
+
 import { WorkerStatusIndicator } from "../components/system/WorkerStatus";
-import { Send, MousePointerClick, BookOpen, Clock, ArrowUpRight, Filter, Flame, X } from "lucide-react";
+import CRMTargetWidget from "../components/dashboard/CRMTargetWidget";
+import { Send, MousePointerClick, BookOpen, Clock, ArrowUpRight, Filter, Flame, X, BarChart3 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useWebSocket } from "../hooks/useWebSocket";
 import api from "../lib/api";
 import { monitoringService } from "../services/monitoring";
+import { Skeleton } from "../components/ui/Skeleton";
 
 const Dashboard: React.FC = () => {
   const queryClient = useQueryClient();
@@ -67,9 +70,10 @@ const Dashboard: React.FC = () => {
   // WebSocket for real-time events
   const { isConnected, lastMessage } = useWebSocket(`ws://${window.location.host}/api/ws/dashboard`, {
     onMessage: (message) => {
-      // 1. Refetch dashboard data on any outreach event
-      if (message.type === 'event') {
+      // 1. Refetch dashboard and relevant data on events
+      if (message.type === 'event' || message.type === 'crm_event') {
         queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+        queryClient.invalidateQueries({ queryKey: ['lead-stats'] });
       }
 
       // 2. Handle Hot Lead Alerts
@@ -102,18 +106,6 @@ const Dashboard: React.FC = () => {
     }
   });
 
-  const { data: systemStats } = useQuery({
-    queryKey: ['system-stats'],
-    queryFn: () => monitoringService.getSystemStats(),
-    refetchInterval: 60000 // Refresh every minute
-  });
-
-  const { data: infraStats } = useQuery({
-    queryKey: ['infra-stats'],
-    queryFn: () => monitoringService.getInfrastructureStats(),
-    refetchInterval: 30000 // Refresh every 30s
-  });
-
   const { data, isLoading, error } = useQuery({
     queryKey: ['dashboard', selectedWorkflow, selectedCampaign],
     queryFn: async () => {
@@ -126,16 +118,6 @@ const Dashboard: React.FC = () => {
     }
   });
 
-  if (isLoading) {
-    return (
-      <Layout title="Dashboard">
-        <div className="flex items-center justify-center h-64">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
-        </div>
-      </Layout>
-    );
-  }
-
   if (error) {
     return (
       <Layout title="Dashboard">
@@ -144,12 +126,17 @@ const Dashboard: React.FC = () => {
     )
   }
 
-  const { stats, chart_data, recent_activity } = data;
-
-  // Transform API stats to match UI component
-  // Note: API returns a list with one object potentially, based on service logic.
-  // Let's assume the first item in stats list is what we need based on schema.
-  const metrics = stats[0];
+  const { stats, chart_data } = data || { stats: [], chart_data: [] };
+  const metrics = stats[0] || {
+    total_emails_sent: 0,
+    open_rate: 0,
+    click_rate: 0,
+    pending_followups: 0,
+    sent_trend: 0,
+    open_rate_trend: 0,
+    click_rate_trend: 0,
+    pending_trend: 0
+  };
 
   const statCards = [
     {
@@ -189,71 +176,77 @@ const Dashboard: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-4">
-        {statCards.map((stat, index) => (
-          <StatsCard key={index} {...stat} />
-        ))}
-        {systemStats && (
-          <Card className="bg-slate-800/40 border-indigo-500/30">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">System Health</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center text-sm">
-                  <span className="text-slate-400">Emails Queued</span>
-                  <span className="text-slate-100 font-mono">{systemStats.metrics.emails_queued}</span>
-                </div>
-                <div className="flex justify-between items-center text-sm">
-                  <span className="text-slate-400">Active Workflows</span>
-                  <span className="text-slate-100 font-mono">{systemStats.metrics.active_workflows}</span>
-                </div>
-                <div className="flex justify-between items-center text-sm">
-                  <span className="text-slate-400">Events (24h)</span>
-                  <span className="text-slate-100 font-mono">{systemStats.metrics.events_24h}</span>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+        {isLoading ? (
+          <>
+            {[1, 2, 3, 4].map((i) => (
+              <Card key={i} className="p-6">
+                <Skeleton className="h-4 w-24 mb-4" />
+                <Skeleton className="h-8 w-32 mb-2" />
+                <Skeleton className="h-4 w-20" />
+              </Card>
+            ))}
+          </>
+        ) : (
+          statCards.map((stat, index) => (
+            <StatsCard key={index} {...stat} />
+          ))
         )}
       </div>
 
       <div className="grid grid-cols-1 gap-6 mt-8 lg:grid-cols-3">
+        <CRMTargetWidget />
         <Card className="lg:col-span-2">
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>Performance Overview</CardTitle>
+            <Link to="/analytics/performance">
+              <Button variant="ghost" size="sm" className="text-indigo-400 font-bold hover:bg-indigo-500/10">
+                <BarChart3 className="w-4 h-4 mr-2" />
+                Full Stats
+              </Button>
+            </Link>
           </CardHeader>
           <CardContent>
             <div className="h-[300px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chart_data}>
-                  <defs>
-                    <linearGradient id="colorOpens" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="colorClicks" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid vertical={false} stroke="#334155" strokeDasharray="3 3" />
-                  <XAxis dataKey="name" stroke="#94a3b8" />
-                  <YAxis stroke="#94a3b8" />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
-                    itemStyle={{ color: '#f8fafc' }}
-                  />
-                  <Area type="monotone" dataKey="opens" stroke="#6366f1" strokeWidth={2} fillOpacity={1} fill="url(#colorOpens)" />
-                  <Area type="monotone" dataKey="clicks" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#colorClicks)" />
-                </AreaChart>
-              </ResponsiveContainer>
+              {isLoading ? (
+                <div className="w-full h-full flex flex-col space-y-4">
+                  <div className="flex-1 w-full bg-slate-800/20 rounded-lg overflow-hidden relative">
+                    <Skeleton className="absolute inset-0 h-full w-full" />
+                  </div>
+                  <div className="h-4 w-full flex space-x-4">
+                    {[1, 2, 3, 4, 5, 6].map(i => <Skeleton key={i} className="flex-1 h-2" />)}
+                  </div>
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={chart_data}>
+                    <defs>
+                      <linearGradient id="colorOpens" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+                      </linearGradient>
+                      <linearGradient id="colorClicks" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid vertical={false} stroke="#334155" strokeDasharray="3 3" />
+                    <XAxis dataKey="name" stroke="#94a3b8" />
+                    <YAxis stroke="#94a3b8" />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
+                      itemStyle={{ color: '#f8fafc' }}
+                    />
+                    <Area type="monotone" dataKey="opens" stroke="#6366f1" strokeWidth={2} fillOpacity={1} fill="url(#colorOpens)" />
+                    <Area type="monotone" dataKey="clicks" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#colorClicks)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>
 
         <ABTestingWidget />
         <ReputationWidget />
-        {infraStats && <InfrastructureWidget data={infraStats} />}
         <EmailQueueWidget />
         <LiveActivityFeed />
       </div>

@@ -9,6 +9,8 @@ import CampaignDetail from "./pages/CampaignDetail";
 import UserDetail from "./pages/UserDetail";
 import Users from "./pages/Users";
 import Leads from "./pages/Leads";
+import LeadsPipeline from "./pages/LeadsPipeline";
+import LeadsList from "./pages/LeadsList";
 import Settings from "./pages/Settings";
 import WorkflowBuilder from "./pages/WorkflowBuilder";
 import Workflows from "./pages/Workflows";
@@ -18,12 +20,23 @@ import TemplateEditor from "./pages/TemplateEditor";
 import Contacts from "./pages/Contacts";
 import LeadDetail from "./pages/LeadDetail";
 import SystemStatus from "./pages/SystemStatus";
+import AdminPortal from "./pages/AdminPortal";
+import Performance from "./pages/Performance";
 
 const PrivateRoute: React.FC<{ children: React.ReactElement }> = ({ children }) => {
-  const { token } = useAuth();
+  const { token, loading } = useAuth();
+  if (loading) return <div className="p-8 text-slate-400">Verifying session...</div>;
   if (!token) {
     return <Navigate to="/login" replace />;
   }
+  return children;
+};
+
+const AdminRoute: React.FC<{ children: React.ReactElement }> = ({ children }) => {
+  const { token, isAdmin, loading } = useAuth();
+  if (loading) return <div className="p-8 text-slate-400">Verifying permissions...</div>;
+  if (!token) return <Navigate to="/login" replace />;
+  if (!isAdmin) return <Navigate to="/" replace />;
   return children;
 };
 
@@ -56,7 +69,23 @@ const App: React.FC = () => {
           path="/leads"
           element={
             <PrivateRoute>
-              <Leads />
+              <Navigate to="/leads/pipeline" replace />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/leads/pipeline"
+          element={
+            <PrivateRoute>
+              <LeadsPipeline />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/leads/list"
+          element={
+            <PrivateRoute>
+              <LeadsList />
             </PrivateRoute>
           }
         />
@@ -167,13 +196,33 @@ const App: React.FC = () => {
           }
         />
         <Route
-          path="/system-status"
+          path="/analytics/system"
           element={
             <PrivateRoute>
               <SystemStatus />
             </PrivateRoute>
           }
         />
+        <Route
+          path="/analytics/performance"
+          element={
+            <PrivateRoute>
+              <Performance />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/admin"
+          element={
+            <AdminRoute>
+              <AdminPortal />
+            </AdminRoute>
+          }
+        />
+
+        {/* Redirects for refactored routes */}
+        <Route path="/system-status" element={<Navigate to="/analytics/system" replace />} />
+        <Route path="/performance" element={<Navigate to="/analytics/performance" replace />} />
 
         {/* Public Routes */}
         <Route path="/unsubscribe/:token" element={<Unsubscribe />} />

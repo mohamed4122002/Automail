@@ -1,13 +1,10 @@
+from beanie.operators import In
 from fastapi import APIRouter, Depends, HTTPException, Request
-from typing import Optional, List, Dict, Any
-from fastapi.responses import HTMLResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel
 from datetime import datetime
 
-from ..db import get_db
 from ..models import Event, User, WorkflowInstance, EmailSend, EventTypeEnum
 
 router = APIRouter(prefix="/unsubscribe", tags=["unsubscribe"])
@@ -21,34 +18,23 @@ class UnsubscribeRequest(BaseModel):
 
 @router.post("/{token}")
 async def unsubscribe_via_token(
-    token: UUID,
-    db: AsyncSession = Depends(get_db)
+    token: UUID
 ):
     """
     Handle unsubscribe via unique token.
-    
-    Actions:
-    1. Find EmailSend record by token
-    2. Create UNSUBSCRIBED event linked to user/campaign/workflow
-    3. Update user lead_status to 'unsubscribed'
-    4. Stop all active workflows for this user
-    5. Broadcast event via WebSocket
     """
     
     # Get the email send record
-    q_send = await db.execute(
-        select(EmailSend).where(EmailSend.unsubscribe_token == token)
-    )
-    email_send = q_send.scalar_one_or_none()
-    
+    email_send = await EmailSend.find_one(EmailSend.unsubscribe_token == str(token)) # Token is saved as str usually, but check type
+    if not email_send:
+        # Try UUID matching if UUID was stored
+        email_send = await EmailSend.find_one(EmailSend.unsubscribe_token == token)
+        
     if not email_send:
         raise HTTPException(status_code=404, detail="Invalid or expired unsubscribe token")
     
     # Get user
-    q_user = await db.execute(
-        select(User).where(User.id == email_send.user_id)
-    )
-    user = q_user.scalar_one_or_none()
+    user = await User.find_one(User.id == email_send.user_id)
     
     if not user:
         raise HTTPException(status_code=404, detail="User associated with this token not found")
@@ -71,25 +57,22 @@ async def unsubscribe_via_token(
             "token": str(token)
         }
     )
-    db.add(event)
+    await event.insert()
     
     # Update user status
     user.lead_status = "unsubscribed"
+    await user.save()
     
     # Stop all active workflow instances for this user
-    await db.execute(
-        update(WorkflowInstance)
-        .where(
-            WorkflowInstance.user_id == user.id,
-            WorkflowInstance.status.in_(["active", "waiting"])
-        )
-        .values(
-            status="stopped",
-            completed_at=datetime.utcnow()
-        )
-    )
+    active_instances = await WorkflowInstance.find(
+        WorkflowInstance.user_id == user.id,
+        In(WorkflowInstance.status, ["active", "waiting"])
+    ).to_list()
     
-    await db.commit()
+    for instance in active_instances:
+        instance.status = "stopped"
+        instance.completed_at = datetime.utcnow()
+        await instance.save()
     
     # Broadcast to WebSocket
     try:
@@ -113,8 +96,7 @@ async def unsubscribe_via_token(
 
 @router.post("/api")
 async def unsubscribe_via_api(
-    request: UnsubscribeRequest,
-    db: AsyncSession = Depends(get_db)
+    request: UnsubscribeRequest
 ):
     """
     API endpoint to unsubscribe a user programmatically.
@@ -122,10 +104,7 @@ async def unsubscribe_via_api(
     """
     
     # Get user
-    q_user = await db.execute(
-        select(User).where(User.id == request.user_id)
-    )
-    user = q_user.scalar_one_or_none()
+    user = await User.find_one(User.id == request.user_id)
     
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -141,27 +120,24 @@ async def unsubscribe_via_api(
             "reason": request.reason
         }
     )
-    db.add(event)
+    await event.insert()
     
     # Update user status
     user.lead_status = "unsubscribed"
+    await user.save()
     
     # Stop all active workflows
-    result = await db.execute(
-        update(WorkflowInstance)
-        .where(
-            WorkflowInstance.user_id == request.user_id,
-            WorkflowInstance.status.in_(["active", "waiting"])
-        )
-        .values(
-            status="stopped",
-            completed_at=datetime.utcnow()
-        )
-    )
+    active_instances = await WorkflowInstance.find(
+        WorkflowInstance.user_id == request.user_id,
+        In(WorkflowInstance.status, ["active", "waiting"])
+    ).to_list()
     
-    workflows_stopped = result.rowcount
+    for instance in active_instances:
+        instance.status = "stopped"
+        instance.completed_at = datetime.utcnow()
+        await instance.save()
     
-    await db.commit()
+    workflows_stopped = len(active_instances)
     
     return {
         "message": "User unsubscribed successfully",
@@ -173,8 +149,7 @@ async def unsubscribe_via_api(
 
 @router.get("/stats")
 async def get_unsubscribe_stats(
-    days: int = 30,
-    db: AsyncSession = Depends(get_db)
+    days: int = 30
 ):
     """Get unsubscribe statistics for dashboard metrics."""
     
@@ -182,34 +157,21 @@ async def get_unsubscribe_stats(
     since = datetime.utcnow() - timedelta(days=days)
     
     # Total unsubscribes
-    q_total = await db.execute(
-        select(func.count(Event.id))
-        .where(
-            Event.type == EventTypeEnum.UNSUBSCRIBED,
-            Event.created_at >= since
-        )
-    )
-    total_unsubscribes = q_total.scalar_one() or 0
+    total_unsubscribes = await Event.find(
+        Event.type == EventTypeEnum.UNSUBSCRIBED,
+        Event.created_at >= since
+    ).count()
     
     # Unsubscribe rate (unsubscribes / total sent)
-    from ..models import EmailSend
-    q_sent = await db.execute(
-        select(func.count(EmailSend.id))
-        .where(
-            EmailSend.status == "sent",
-            EmailSend.created_at >= since
-        )
-    )
-    total_sent = q_sent.scalar_one() or 0
+    total_sent = await EmailSend.find(
+        EmailSend.status == "sent",
+        EmailSend.created_at >= since
+    ).count()
     
     unsubscribe_rate = (total_unsubscribes / total_sent * 100) if total_sent > 0 else 0
     
     # Total users with unsubscribed status
-    q_users = await db.execute(
-        select(func.count(User.id))
-        .where(User.lead_status == "unsubscribed")
-    )
-    total_unsubscribed_users = q_users.scalar_one() or 0
+    total_unsubscribed_users = await User.find(User.lead_status == "unsubscribed").count()
     
     return {
         "total_unsubscribes": total_unsubscribes,

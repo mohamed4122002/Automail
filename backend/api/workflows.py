@@ -1,12 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
 from uuid import UUID
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-from ..db import get_db
 from ..models import Workflow, WorkflowNode, WorkflowEdge, Campaign
 from ..schemas.utils import orm_to_pydantic, orm_list_to_pydantic
 from ..api.deps import get_current_user_id
@@ -68,22 +65,16 @@ class WorkflowUpdateRequest(BaseModel):
 
 @router.get("", response_model=List[WorkflowResponse])
 async def list_workflows(
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """List all workflows."""
-    q = await db.execute(
-        select(Workflow).order_by(Workflow.created_at.desc())
-    )
-    workflows = q.scalars().all()
-    
+    workflows = await Workflow.find_all().sort("-created_at").to_list()
     return orm_list_to_pydantic(workflows, WorkflowResponse)
 
 
 @router.post("", response_model=WorkflowResponse)
 async def create_workflow(
     request: WorkflowCreateRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Create a new workflow."""
@@ -94,23 +85,17 @@ async def create_workflow(
         is_active=True
     )
     
-    db.add(workflow)
-    await db.commit()
-    await db.refresh(workflow)
-    
+    await workflow.insert()
     return orm_to_pydantic(workflow, WorkflowResponse)
 
 
 @router.get("/{workflow_id}", response_model=WorkflowResponse)
 async def get_workflow(
     workflow_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    user_id: UUID = Depends(get_current_user_id)
 ):
     """Get a workflow by ID."""
-    q = await db.execute(
-        select(Workflow).where(Workflow.id == workflow_id)
-    )
-    workflow = q.scalar_one_or_none()
+    workflow = await Workflow.find_one(Workflow.id == workflow_id)
     
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -122,41 +107,29 @@ async def get_workflow(
 async def save_workflow_graph(
     workflow_id: UUID,
     graph: WorkflowGraphRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """
     Save workflow graph (nodes and edges) from React Flow.
     Converts React Flow format to database models.
     """
-    # Verify workflow exists
-    q = await db.execute(
-        select(Workflow).where(Workflow.id == workflow_id)
-    )
-    workflow = q.scalar_one_or_none()
+    workflow = await Workflow.find_one(Workflow.id == workflow_id)
     
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     
     # Delete existing nodes and edges
-    await db.execute(
-        delete(WorkflowNode).where(WorkflowNode.workflow_id == workflow_id)
-    )
-    await db.execute(
-        delete(WorkflowEdge).where(WorkflowEdge.workflow_id == workflow_id)
-    )
+    await WorkflowNode.find(WorkflowNode.workflow_id == workflow_id).delete()
+    await WorkflowEdge.find(WorkflowEdge.workflow_id == workflow_id).delete()
     
     # Create node ID mapping (React Flow ID -> DB UUID)
     node_id_map = {}
     
-    # Save nodes
     from ..schemas.workflow_nodes import WorkflowNodeConfigModel
     from pydantic import ValidationError
     
     for react_node in graph.nodes:
-        # Validate data against strict schemas
         try:
-            # Normalize type to match literal expectations (start, email, delay, etc.)
             node_type = react_node.type
             if node_type == 'trigger' or 'contact_added' in node_type:
                 node_type = 'start'
@@ -165,21 +138,12 @@ async def save_workflow_graph(
             elif node_type == 'wait':
                 node_type = 'delay'
             
-            # Ensure it's one of the valid literals
-            valid_types = ["start", "email", "delay", "condition", "action", "end"]
-            if node_type not in valid_types:
-                pass
-
-            # Reconstruct for validation: { "type": node_type, **data }
             clean_data = {k: v for k, v in react_node.data.items() if k != 'type'}
             
-            # Auto-populate label if missing for better UI experience
             if not clean_data.get('label'):
                 clean_data['label'] = f"{node_type.capitalize()} Node"
             
             validation_data = {"type": node_type, **clean_data}
-            
-            # Use RootModel for clean discriminator validation
             WorkflowNodeConfigModel.model_validate(validation_data)
         except ValidationError as e:
             raise HTTPException(
@@ -187,32 +151,27 @@ async def save_workflow_graph(
                 detail=f"Invalid configuration for {react_node.type} node '{react_node.id}': {e.errors()}"
             )
 
-        # Update the react_node.data so the saved config in DB has the auto-populated label
         react_node.data['label'] = clean_data['label']
 
         db_node = WorkflowNode(
             workflow_id=workflow_id,
-            type=node_type, # Use the normalized type
+            type=node_type,
             config={
                 "position": react_node.position,
                 "data": react_node.data,
                 "react_flow_id": react_node.id
             }
         )
-        db.add(db_node)
-        await db.flush()
-        
-        # Map React Flow ID to DB UUID
+        await db_node.insert()
         node_id_map[react_node.id] = db_node.id
     
     # Save edges
     for react_edge in graph.edges:
-        # Find source and target node UUIDs
         source_uuid = node_id_map.get(react_edge.source)
         target_uuid = node_id_map.get(react_edge.target)
         
         if not source_uuid or not target_uuid:
-            continue  # Skip invalid edges
+            continue
         
         db_edge = WorkflowEdge(
             workflow_id=workflow_id,
@@ -225,9 +184,7 @@ async def save_workflow_graph(
                 "react_flow_id": react_edge.id
             }
         )
-        db.add(db_edge)
-    
-    await db.commit()
+        await db_edge.insert()
     
     return {
         "message": "Workflow graph saved successfully",
@@ -240,37 +197,21 @@ async def save_workflow_graph(
 @router.get("/{workflow_id}/graph", response_model=WorkflowGraphResponse)
 async def load_workflow_graph(
     workflow_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    user_id: UUID = Depends(get_current_user_id)
 ):
     """
     Load workflow graph from database and convert to React Flow format.
     """
-    # Get workflow
-    q_workflow = await db.execute(
-        select(Workflow).where(Workflow.id == workflow_id)
-    )
-    workflow = q_workflow.scalar_one_or_none()
-    
+    workflow = await Workflow.find_one(Workflow.id == workflow_id)
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     
-    # Get nodes
-    q_nodes = await db.execute(
-        select(WorkflowNode).where(WorkflowNode.workflow_id == workflow_id)
-    )
-    db_nodes = q_nodes.scalars().all()
+    db_nodes = await WorkflowNode.find(WorkflowNode.workflow_id == workflow_id).to_list()
+    db_edges = await WorkflowEdge.find(WorkflowEdge.workflow_id == workflow_id).to_list()
     
-    # Get edges
-    q_edges = await db.execute(
-        select(WorkflowEdge).where(WorkflowEdge.workflow_id == workflow_id)
-    )
-    db_edges = q_edges.scalars().all()
-    
-    # Create UUID -> React Flow ID mapping
     uuid_to_react_id = {}
     react_nodes = []
     
-    # Convert nodes
     for db_node in db_nodes:
         config = db_node.config or {}
         react_flow_id = config.get("react_flow_id", str(db_node.id))
@@ -283,7 +224,6 @@ async def load_workflow_graph(
             data=config.get("data", {})
         ))
     
-    # Convert edges
     react_edges = []
     for db_edge in db_edges:
         condition = db_edge.condition or {}
@@ -312,19 +252,13 @@ async def load_workflow_graph(
 async def patch_workflow(
     workflow_id: UUID,
     request: WorkflowUpdateRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Partially update a workflow."""
-    q = await db.execute(
-        select(Workflow).where(Workflow.id == workflow_id)
-    )
-    workflow = q.scalar_one_or_none()
-    
+    workflow = await Workflow.find_one(Workflow.id == workflow_id)
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     
-    # Update fields if provided
     if request.name is not None:
         workflow.name = request.name
     if request.description is not None:
@@ -334,28 +268,23 @@ async def patch_workflow(
     if request.is_active is not None:
         workflow.is_active = request.is_active
         
-    await db.commit()
-    await db.refresh(workflow)
-    
+    await workflow.save()
     return orm_to_pydantic(workflow, WorkflowResponse)
 
 
 @router.delete("/{workflow_id}")
 async def delete_workflow(
     workflow_id: UUID,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Delete a workflow and all its nodes/edges."""
-    q = await db.execute(
-        select(Workflow).where(Workflow.id == workflow_id)
-    )
-    workflow = q.scalar_one_or_none()
+    workflow = await Workflow.find_one(Workflow.id == workflow_id)
     
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     
-    await db.delete(workflow)
-    await db.commit()
+    await WorkflowNode.find(WorkflowNode.workflow_id == workflow_id).delete()
+    await WorkflowEdge.find(WorkflowEdge.workflow_id == workflow_id).delete()
+    await workflow.delete()
     
     return {"message": "Workflow deleted successfully"}

@@ -10,13 +10,25 @@ class Settings(BaseSettings):
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        # Prioritize .env file OVER system environment variables
+        return (init_settings, dotenv_settings, env_settings, file_secret_settings)
+
     # Core
     APP_NAME: str = "Marketing Automation Platform"
     ENV: str = "development"
 
     # ── Database ──────────────────────────────────────────────────────────────
     # No default — will raise a clear error if not set in .env
-    DATABASE_URL: str
+    MONGODB_URL: str
 
     # ── Security ──────────────────────────────────────────────────────────────
     JWT_SECRET_KEY: str
@@ -46,21 +58,14 @@ class Settings(BaseSettings):
     EMAIL_FROM_DEFAULT: str = "no-reply@example.com"
     FRONTEND_URL: str = "http://localhost:5173"
 
-    # ── Connection Pool ───────────────────────────────────────────────────────
-    DB_POOL_SIZE: int = 10
-    DB_MAX_OVERFLOW: int = 20
-    DB_POOL_RECYCLE: int = 3600  # seconds
-    DB_STATEMENT_TIMEOUT_MS: int = 30000  # 30 seconds
-    DB_LOCK_TIMEOUT_MS: int = 5000  # 5 seconds
-
     # ── Validators ────────────────────────────────────────────────────────────
-    @field_validator("DATABASE_URL", mode="before")
+    @field_validator("MONGODB_URL", mode="before")
     @classmethod
     def validate_db_url(cls, v: str) -> str:
         if not v:
             raise ValueError(
-                "DATABASE_URL is required. Add it to your .env file.\n"
-                "Example: DATABASE_URL=postgresql://user:password@localhost:5432/dbname"
+                "MONGODB_URL is required. Add it to your .env file.\n"
+                "Example: MONGODB_URL=mongodb://questioner_mongodb:27017/marketing_db"
             )
         return v
 
@@ -86,8 +91,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":
         if self.ENV.lower() == "production":
-            if "localhost" in self.DATABASE_URL or "127.0.0.1" in self.DATABASE_URL:
-                raise ValueError("SECURITY: DATABASE_URL points to localhost in production!")
+            if "localhost" in self.MONGODB_URL or "127.0.0.1" in self.MONGODB_URL:
+                raise ValueError("SECURITY: MONGODB_URL points to localhost in production!")
             if self.CORS_ORIGINS == "*":
                 raise ValueError("SECURITY: CORS_ORIGINS cannot be '*' in production!")
         return self

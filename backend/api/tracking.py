@@ -1,11 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import RedirectResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 from datetime import datetime
-import sqlalchemy as sa
 
-from ..db import get_db
 from ..models import Event, EmailSend, EventTypeEnum
 from ..tasks import _broadcast_event_to_websocket
 
@@ -14,8 +11,7 @@ router = APIRouter(prefix="/track", tags=["tracking"])
 @router.get("/click/{email_send_id}")
 async def track_click(
     email_send_id: UUID,
-    url: str = Query(..., description="Target URL to redirect to"),
-    db: AsyncSession = Depends(get_db)
+    url: str = Query(..., description="Target URL to redirect to")
 ):
     """
     Track a link click from an email.
@@ -28,12 +24,9 @@ async def track_click(
     """
     
     # 1. Find EmailSend
-    res = await db.execute(
-        sa.select(EmailSend)
-        .options(sa.orm.selectinload(EmailSend.campaign))
-        .where(EmailSend.id == email_send_id)
-    )
-    email_send = res.scalar_one_or_none()
+    # We use Beanie/MongoDB so no join is directly fetching the campaign.
+    # Campaign name will be queried if needed.
+    email_send = await EmailSend.find_one(EmailSend.id == email_send_id)
     
     if not email_send:
         # Still redirect if email_send not found (don't break user experience)
@@ -52,23 +45,23 @@ async def track_click(
             "timestamp": datetime.utcnow().isoformat()
         }
     )
-    db.add(event)
-    
-    # Flush to ensure event is in DB if needed by broadcast or other logic
-    await db.flush()
+    await event.insert()
     
     # 3. Broadcast Hot Lead
-    # Note: _broadcast_event_to_websocket is async-safe but usually called in asyncio.run
-    # Here we are already in an async context.
+    from ..models import Campaign
+    campaign_name = None
+    if email_send.campaign_id:
+        campaign = await Campaign.find_one(Campaign.id == email_send.campaign_id)
+        if campaign:
+            campaign_name = campaign.name
+            
     await _broadcast_event_to_websocket(
         event_type="clicked",
         user_id=str(email_send.user_id),
-        user_email=email_send.to_email,
+        user_email=email_send.to_email if hasattr(email_send, "to_email") else "",
         campaign_id=str(email_send.campaign_id) if email_send.campaign_id else None,
-        campaign_name=email_send.campaign.name if email_send.campaign else None
+        campaign_name=campaign_name
     )
-    
-    await db.commit()
     
     # 4. Redirect
     return RedirectResponse(url=url)
@@ -76,8 +69,7 @@ async def track_click(
 
 @router.get("/open/{email_send_id}")
 async def track_open(
-    email_send_id: UUID,
-    db: AsyncSession = Depends(get_db)
+    email_send_id: UUID
 ):
     """
     Track an email open via a tracking pixel.
@@ -91,12 +83,7 @@ async def track_open(
     from fastapi.responses import Response
     
     # 1. Find EmailSend
-    res = await db.execute(
-        sa.select(EmailSend)
-        .options(sa.orm.selectinload(EmailSend.campaign))
-        .where(EmailSend.id == email_send_id)
-    )
-    email_send = res.scalar_one_or_none()
+    email_send = await EmailSend.find_one(EmailSend.id == email_send_id)
     
     if email_send:
         # 2. Record Event
@@ -111,19 +98,24 @@ async def track_open(
                 "timestamp": datetime.utcnow().isoformat()
             }
         )
-        db.add(event)
+        await event.insert()
         
         # 3. Broadcast
+        from ..models import Campaign
+        campaign_name = None
+        if email_send.campaign_id:
+            campaign = await Campaign.find_one(Campaign.id == email_send.campaign_id)
+            if campaign:
+                campaign_name = campaign.name
+                
         await _broadcast_event_to_websocket(
             event_type="opened",
             user_id=str(email_send.user_id),
-            user_email=email_send.to_email,
+            user_email=email_send.to_email if hasattr(email_send, "to_email") else "",
             campaign_id=str(email_send.campaign_id) if email_send.campaign_id else None,
-            campaign_name=email_send.campaign.name if email_send.campaign else None
+            campaign_name=campaign_name
         )
         
-        await db.commit()
-    
     # 4. Return 1x1 transparent GIF pixel
     pixel_data = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
     return Response(content=pixel_data, media_type="image/gif")

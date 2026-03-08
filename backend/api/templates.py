@@ -1,12 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException
 from uuid import UUID, uuid4
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 import liquid
 
-from ..db import get_db
 from ..models import EmailTemplate
 from ..api.deps import get_current_user_id
 
@@ -41,22 +38,18 @@ class PreviewResponse(BaseModel):
 
 @router.get("", response_model=List[TemplateResponse])
 async def list_templates(
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """List all available email templates."""
-    result = await db.execute(select(EmailTemplate))
-    return result.scalars().all()
+    return await EmailTemplate.find_all().to_list()
 
 @router.get("/{template_id}", response_model=TemplateResponse)
 async def get_template(
     template_id: UUID,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Get a specific template by ID."""
-    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))
-    template = result.scalar_one_or_none()
+    template = await EmailTemplate.find_one(EmailTemplate.id == template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     return template
@@ -64,7 +57,6 @@ async def get_template(
 @router.post("", response_model=TemplateResponse)
 async def create_template(
     template_in: TemplateCreate,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Create a new email template."""
@@ -74,21 +66,17 @@ async def create_template(
         subject=template_in.subject,
         html_body=template_in.html_body
     )
-    db.add(template)
-    await db.commit()
-    await db.refresh(template)
+    await template.insert()
     return template
 
 @router.patch("/{template_id}", response_model=TemplateResponse)
 async def update_template(
     template_id: UUID,
     template_in: TemplateUpdate,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Update an existing template."""
-    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))
-    template = result.scalar_one_or_none()
+    template = await EmailTemplate.find_one(EmailTemplate.id == template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     
@@ -96,24 +84,20 @@ async def update_template(
     for field, value in update_data.items():
         setattr(template, field, value)
     
-    await db.commit()
-    await db.refresh(template)
+    await template.save()
     return template
 
 @router.delete("/{template_id}")
 async def delete_template(
     template_id: UUID,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Delete a template."""
-    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))
-    template = result.scalar_one_or_none()
+    template = await EmailTemplate.find_one(EmailTemplate.id == template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     
-    await db.delete(template)
-    await db.commit()
+    await template.delete()
     return {"status": "success"}
 
 @router.post("/preview", response_model=PreviewResponse)

@@ -1,5 +1,4 @@
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
+from beanie.operators import In
 from uuid import UUID
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -7,8 +6,8 @@ from datetime import datetime
 from ..models import EmailVariant, EmailSend, Event, EventTypeEnum
 
 class ABTestingService:
-    def __init__(self, db: AsyncSession):
-        self.db = db
+    def __init__(self):
+        pass
 
     async def create_test(
         self,
@@ -29,7 +28,7 @@ class ABTestingService:
             html_body=html_body,
             weight=0.5
         )
-        self.db.add(variant_a)
+        await variant_a.insert()
         
         # Variant B
         variant_b = EmailVariant(
@@ -39,9 +38,7 @@ class ABTestingService:
             html_body=html_body,
             weight=0.5
         )
-        self.db.add(variant_b)
-        
-        await self.db.commit()
+        await variant_b.insert()
         
         # Return a synthetic test object
         return {
@@ -60,11 +57,13 @@ class ABTestingService:
         Find if an A/B test is active.
         Returns the first variant if multiple exist (implying a test).
         """
-        query = sa.select(EmailVariant).where(
-            (EmailVariant.campaign_id == campaign_id) if campaign_id else (EmailVariant.workflow_step_id == workflow_step_id)
-        )
-        result = await self.db.execute(query)
-        variants = result.scalars().all()
+        filters = []
+        if campaign_id:
+            filters.append(EmailVariant.campaign_id == campaign_id)
+        if workflow_step_id:
+            filters.append(EmailVariant.workflow_step_id == workflow_step_id)
+            
+        variants = await EmailVariant.find(*filters).to_list()
         
         if len(variants) >= 2:
             return variants[0] # Return first variant as a handle
@@ -75,20 +74,19 @@ class ABTestingService:
         """Calculate stats for an A/B test (all variants in the group)."""
         
         # Get the reference variant to find the group
-        ref_query = sa.select(EmailVariant).where(EmailVariant.id == variant_id_handle)
-        ref_result = await self.db.execute(ref_query)
-        ref_variant = ref_result.scalar_one_or_none()
+        ref_variant = await EmailVariant.find_one(EmailVariant.id == variant_id_handle)
         
         if not ref_variant:
             return {}
             
         # Find all variants in this group
-        group_query = sa.select(EmailVariant).where(
-            (EmailVariant.campaign_id == ref_variant.campaign_id) if ref_variant.campaign_id else 
-            (EmailVariant.workflow_step_id == ref_variant.workflow_step_id)
-        )
-        group_result = await self.db.execute(group_query)
-        variants = group_result.scalars().all()
+        filters = []
+        if ref_variant.campaign_id:
+            filters.append(EmailVariant.campaign_id == ref_variant.campaign_id)
+        if ref_variant.workflow_step_id:
+            filters.append(EmailVariant.workflow_step_id == ref_variant.workflow_step_id)
+            
+        variants = await EmailVariant.find(*filters).to_list()
         
         stats = {}
         total_sent = 0
@@ -101,22 +99,19 @@ class ABTestingService:
             label = labels[i] if i < len(labels) else f"var_{i}"
             
             # Sent count (from EmailSend)
-            sent_query = sa.select(sa.func.count(EmailSend.id)).where(
-                EmailSend.variant_id == variant.id
-            )
-            sent_res = await self.db.execute(sent_query)
-            sent_count = sent_res.scalar_one() or 0
+            sent_count = await EmailSend.find(EmailSend.variant_id == variant.id).count()
             total_sent += sent_count
 
             # Opened count
-            opened_query = sa.select(sa.func.count(Event.id)).join(EmailSend).where(
-                sa.and_(
-                    EmailSend.variant_id == variant.id,
+            sends = await EmailSend.find(EmailSend.variant_id == variant.id).to_list()
+            send_ids = [s.id for s in sends]
+            
+            opened_count = 0
+            if send_ids:
+                opened_count = await Event.find(
+                    In(Event.email_send_id, send_ids),
                     Event.type == EventTypeEnum.OPENED
-                )
-            )
-            opened_res = await self.db.execute(opened_query)
-            opened_count = opened_res.scalar_one() or 0
+                ).count()
             
             rate = round((opened_count / sent_count) * 100, 2) if sent_count > 0 else 0
             
@@ -163,24 +158,22 @@ class ABTestingService:
         winner_id = UUID(stats[winner_label]["id"])
         
         # Get reference
-        ref_result = await self.db.execute(sa.select(EmailVariant).where(EmailVariant.id == variant_id_handle))
-        ref_variant = ref_result.scalar_one()
+        ref_variant = await EmailVariant.find_one(EmailVariant.id == variant_id_handle)
         
         # Update all in group
-        group_query = sa.select(EmailVariant).where(
-            (EmailVariant.campaign_id == ref_variant.campaign_id) if ref_variant.campaign_id else 
-            (EmailVariant.workflow_step_id == ref_variant.workflow_step_id)
-        )
-        group_res = await self.db.execute(group_query)
-        variants = group_res.scalars().all()
+        filters = []
+        if ref_variant.campaign_id:
+            filters.append(EmailVariant.campaign_id == ref_variant.campaign_id)
+        if ref_variant.workflow_step_id:
+            filters.append(EmailVariant.workflow_step_id == ref_variant.workflow_step_id)
+            
+        variants = await EmailVariant.find(*filters).to_list()
         
         for v in variants:
             if v.id == winner_id:
                 v.weight = 1.0
             else:
                 v.weight = 0.0
-            self.db.add(v)
+            await v.save()
             
-        await self.db.commit()
-        
         return winner_label

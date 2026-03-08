@@ -1,6 +1,4 @@
 import json
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
 from redis import Redis
 from datetime import datetime
 from uuid import UUID
@@ -9,24 +7,20 @@ from ..models import Campaign
 from ..config import settings
 
 class ReputationWarmupService:
-    def __init__(self, db: AsyncSession, redis_client: Optional[Redis] = None):
-        self.db = db
+    def __init__(self, redis_client: Optional[Redis] = None):
         # Initialize Redis client if not provided
         if redis_client:
             self.redis = redis_client
         else:
             self.redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
-    def _get_daily_key(self, campaign_id: UUID) -> str:
+    def _get_daily_key(self, campaign_id: UUID | str) -> str:
         today = datetime.utcnow().strftime("%Y-%m-%d")
         return f"warmup:{str(campaign_id)}:{today}"
 
-    async def check_warmup_limit(self, campaign_id: UUID) -> bool:
+    async def check_warmup_limit(self, campaign_id: UUID | str) -> bool:
         """Returns True if within limit, False if limit reached."""
-        result = await self.db.execute(
-            sa.select(Campaign).where(Campaign.id == campaign_id)
-        )
-        campaign = result.scalar_one_or_none()
+        campaign = await Campaign.find_one(Campaign.id == (UUID(campaign_id) if isinstance(campaign_id, str) else campaign_id))
         
         if not campaign or not campaign.warmup_config.get("enabled"):
             return True
@@ -37,17 +31,14 @@ class ReputationWarmupService:
         sent_today = int(self.redis.get(daily_key) or 0)
         return sent_today < current_limit
 
-    async def increment_sent_count(self, campaign_id: UUID):
+    async def increment_sent_count(self, campaign_id: UUID | str):
         daily_key = self._get_daily_key(campaign_id)
         self.redis.incr(daily_key)
         # Set expiry to 48h to ensure it clears but stays long enough for edge cases
         self.redis.expire(daily_key, 172800)
 
-    async def get_warmup_status(self, campaign_id: UUID) -> Dict[str, Any]:
-        result = await self.db.execute(
-            sa.select(Campaign).where(Campaign.id == campaign_id)
-        )
-        campaign = result.scalar_one_or_none()
+    async def get_warmup_status(self, campaign_id: UUID | str) -> Dict[str, Any]:
+        campaign = await Campaign.find_one(Campaign.id == (UUID(campaign_id) if isinstance(campaign_id, str) else campaign_id))
         if not campaign:
             return {}
 
@@ -64,12 +55,7 @@ class ReputationWarmupService:
 
     async def process_daily_increase(self):
         """Task to increment volume for all active warmup campaigns."""
-        result = await self.db.execute(
-            sa.select(Campaign).where(
-                Campaign.is_active == True
-            )
-        )
-        campaigns = result.scalars().all()
+        campaigns = await Campaign.find(Campaign.is_active == True).to_list()
         
         count = 0
         for campaign in campaigns:
@@ -99,7 +85,7 @@ class ReputationWarmupService:
                 new_cfg["current_limit"] = new_limit
                 campaign.warmup_config = new_cfg
                 campaign.warmup_last_limit_increase = datetime.utcnow()
+                await campaign.save()
                 count += 1
         
-        await self.db.commit()
         return count

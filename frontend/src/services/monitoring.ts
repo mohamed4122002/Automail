@@ -1,6 +1,6 @@
-import axios from 'axios';
+import api from '../lib/api';
 
-const API_BASE_URL = '/api/v1/monitor';
+const API_BASE_URL = '/v1/monitor';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -89,47 +89,47 @@ export interface CampaignMonitoring {
 
 export const monitoringService = {
     getHealth: async (): Promise<HealthStatus> => {
-        const response = await axios.get(`${API_BASE_URL}/health`);
+        const response = await api.get(`${API_BASE_URL}/health`);
         return response.data;
     },
 
     getSystemStats: async (): Promise<SystemStats> => {
-        const response = await axios.get(`${API_BASE_URL}/system`);
+        const response = await api.get(`${API_BASE_URL}/system`);
         return response.data;
     },
 
     getDbPoolStats: async (): Promise<DbPoolStats> => {
-        const response = await axios.get(`${API_BASE_URL}/db-pool`);
+        const response = await api.get(`${API_BASE_URL}/db-pool`);
         return response.data;
     },
 
     getSecurityStatus: async (): Promise<SecurityStatus> => {
-        const response = await axios.get(`${API_BASE_URL}/security-status`);
+        const response = await api.get(`${API_BASE_URL}/security-status`);
         return response.data;
     },
 
     getIndexHealth: async (): Promise<IndexHealth> => {
-        const response = await axios.get(`${API_BASE_URL}/index-health`);
+        const response = await api.get(`${API_BASE_URL}/index-health`);
         return response.data;
     },
 
     getCampaignMonitoring: async (campaignId: string): Promise<CampaignMonitoring> => {
-        const response = await axios.get(`${API_BASE_URL}/campaign/${campaignId}`);
+        const response = await api.get(`${API_BASE_URL}/campaign/${campaignId}`);
         return response.data;
     },
 
     getInfrastructureStats: async (): Promise<any> => {
-        const response = await axios.get(`${API_BASE_URL}/infrastructure`);
+        const response = await api.get(`${API_BASE_URL}/infrastructure`);
         return response.data;
     },
 
     getWorkflowHealth: async (): Promise<any> => {
-        const response = await axios.get(`${API_BASE_URL}/workflow/health`);
+        const response = await api.get(`${API_BASE_URL}/workflow/health`);
         return response.data;
     },
 
     repairWorkflows: async (): Promise<any> => {
-        const response = await axios.post(`${API_BASE_URL}/workflow/repair`);
+        const response = await api.post(`${API_BASE_URL}/workflow/repair`);
         return response.data;
     },
 };

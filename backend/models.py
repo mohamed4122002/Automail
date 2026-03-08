@@ -1,46 +1,20 @@
 import uuid
 import enum
 from datetime import datetime, timezone
-from typing import Optional
-
-from sqlalchemy import (
-    String,
-    DateTime,
-    ForeignKey,
-    Boolean,
-    Integer,
-    Text,
-    UniqueConstraint,
-    Enum as SaEnum,
-    Index,
-)
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-import sqlalchemy as sa
-
-from .db import Base
-
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
+from beanie import Document
+import pymongo
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
-class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, nullable=False
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
-    )
-
-
 class LeadStatusEnum(str, enum.Enum):
-    hot = "hot"           # Clicked link
-    warm = "warm"         # Opened email but didn't click
-    cold = "cold"         # Ignored all emails (3 attempts)
-    new = "new"           # Just added, no emails sent yet
+    hot = "hot"
+    warm = "warm"
+    cold = "cold"
+    new = "new"
     unsubscribed = "unsubscribed"
-
 
 class EventTypeEnum(str, enum.Enum):
     SENT = "sent"
@@ -50,558 +24,594 @@ class EventTypeEnum(str, enum.Enum):
     UNSUBSCRIBED = "unsubscribed"
     COMPLAINT = "complaint"
 
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    SALES_LEAD = "sales_lead"
+    TEAM_MEMBER = "team_member"
 
-class User(Base, TimestampMixin):
-    __tablename__ = "users"
+class User(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    email: str
+    hashed_password: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    is_active: bool = True
+    role: UserRole = Field(default=UserRole.TEAM_MEMBER) # Added single role for clarity in CRM
+    roles: List[str] = Field(default_factory=list) # Kept for backward compatibility
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    hashed_password: Mapped[str] = mapped_column(String(255))
-    first_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    last_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    class Settings:
+        name = "users"
+        indexes = [
+            pymongo.IndexModel([("email", pymongo.ASCENDING)], unique=True)
+        ]
 
-    attributes: Mapped["UserAttribute"] = relationship(
-        "UserAttribute", uselist=False, back_populates="user", cascade="all, delete-orphan"
-    )
-    roles: Mapped[list["UserRole"]] = relationship(
-        "UserRole", back_populates="user", cascade="all, delete-orphan"
-    )
-    assigned_leads: Mapped[list["Lead"]] = relationship(
-        "Lead", foreign_keys="Lead.assigned_to_id", back_populates="assigned_to"
-    )
+class UserAttribute(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    user_id: uuid.UUID
+    data: dict = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-class UserAttribute(Base, TimestampMixin):
-    __tablename__ = "user_attributes"
+    class Settings:
+        name = "user_attributes"
+        indexes = [
+            pymongo.IndexModel([("user_id", pymongo.ASCENDING)], unique=True)
+        ]
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True
-    )
-    data: Mapped[dict] = mapped_column(JSONB, default=dict)
+class Campaign(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    name: str
+    description: Optional[str] = None
+    is_active: bool = False
+    retry_config: dict = Field(default_factory=lambda: {
+        "enabled": True, "first_retry_hours": 48,
+        "second_retry_hours": 72, "third_retry_hours": 120
+    })
+    warmup_config: dict = Field(default_factory=lambda: {
+        "enabled": True, "start_limit": 10,
+        "daily_increment": 5, "max_volume": 1000,
+        "current_limit": 10
+    })
+    warmup_last_limit_increase: Optional[datetime] = None
+    owner_id: uuid.UUID
+    contact_list_id: Optional[uuid.UUID] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    user: Mapped[User] = relationship("User", back_populates="attributes")
+    class Settings:
+        name = "campaigns"
+        indexes = [
+            "name",
+            "owner_id"
+        ]
 
-class Campaign(Base, TimestampMixin):
-    __tablename__ = "campaigns"
+class Workflow(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    name: str
+    description: Optional[str] = None
+    campaign_id: Optional[uuid.UUID] = None
+    is_active: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    name: Mapped[str] = mapped_column(String(255), index=True)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    class Settings:
+        name = "workflows"
+        indexes = [
+            pymongo.IndexModel([("name", pymongo.ASCENDING)], unique=True)
+        ]
+
+class WorkflowNode(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    workflow_id: uuid.UUID
+    type: str
+    config: dict
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "workflow_nodes"
+        indexes = [
+            "workflow_id"
+        ]
+
+class WorkflowEdge(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    workflow_id: uuid.UUID
+    from_node_id: uuid.UUID
+    to_node_id: uuid.UUID
+    condition: Optional[dict] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "workflow_edges"
+        indexes = [
+            "workflow_id", "from_node_id", "to_node_id"
+        ]
+
+class EmailTemplate(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    name: str
+    subject: str
+    html_body: str
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "email_templates"
+        indexes = [
+            pymongo.IndexModel([("name", pymongo.ASCENDING)], unique=True)
+        ]
+
+class EmailSend(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    template_id: Optional[uuid.UUID] = None
+    user_id: uuid.UUID
+    campaign_id: Optional[uuid.UUID] = None
+    workflow_id: Optional[uuid.UUID] = None
+    workflow_step_id: Optional[uuid.UUID] = None
+    to_email: str
+    status: str = "queued"
+    provider_message_id: Optional[str] = None
+    unsubscribe_token: uuid.UUID = Field(default_factory=uuid.uuid4)
+    variant_id: Optional[uuid.UUID] = None
+    variant_letter: Optional[str] = None
+    data: Optional[dict] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "email_sends"
+        indexes = [
+            "status",
+            "created_at",
+            "user_id", "campaign_id",
+            pymongo.IndexModel([("unsubscribe_token", pymongo.ASCENDING)], unique=True)
+        ]
+
+class Event(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    type: str
+    user_id: uuid.UUID
+    campaign_id: Optional[uuid.UUID] = None
+    workflow_id: Optional[uuid.UUID] = None
+    workflow_step_id: Optional[uuid.UUID] = None
+    email_send_id: Optional[uuid.UUID] = None
+    data: Optional[dict] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "events"
+        indexes = [
+            "type",
+            "created_at",
+            "user_id", "campaign_id", "email_send_id"
+        ]
+
+class LeadScore(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    user_id: uuid.UUID
+    score: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "lead_scores"
+        indexes = [
+            pymongo.IndexModel([("user_id", pymongo.ASCENDING)], unique=True)
+        ]
+
+class Pipeline(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    name: str
+    description: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "pipelines"
+        indexes = [
+            pymongo.IndexModel([("name", pymongo.ASCENDING)], unique=True)
+        ]
+
+class PipelineItem(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    pipeline_id: uuid.UUID
+    user_id: uuid.UUID
+    stage: str
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "pipeline_items"
+        indexes = [
+            "pipeline_id", "user_id"
+        ]
+
+class WorkflowInstance(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    workflow_id: uuid.UUID
+    user_id: uuid.UUID
+    status: str = "pending"
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "workflow_instances"
+        indexes = [
+            "status",
+            "updated_at",
+            "workflow_id", "user_id"
+        ]
+
+class WorkflowStep(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    instance_id: uuid.UUID
+    node_id: Optional[uuid.UUID] = None
+    status: str = "pending"
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "workflow_steps"
+        indexes = [
+            "status",
+            "instance_id", "node_id"
+        ]
+
+class WorkflowInstanceData(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    instance_id: uuid.UUID
+    data: dict = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "workflow_instance_data"
+        indexes = [
+            pymongo.IndexModel([("instance_id", pymongo.ASCENDING)], unique=True)
+        ]
+
+class WorkflowSnapshot(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    instance_id: uuid.UUID
+    step_id: uuid.UUID
+    node_id: Optional[uuid.UUID] = None
+    data_snapshot: dict
+    condition_result: dict
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "workflow_snapshots"
+        indexes = [
+            "instance_id", "step_id"
+        ]
+
+class ConditionEvaluationLog(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    instance_id: uuid.UUID
+    node_id: uuid.UUID
+    evaluation_result: bool
+    reason: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "condition_evaluation_logs"
+        indexes = [
+            "instance_id", "node_id"
+        ]
+
+class EmailVariant(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    campaign_id: Optional[uuid.UUID] = None
+    workflow_step_id: Optional[uuid.UUID] = None
+    subject: str
+    html_body: str
+    weight: float = 0.5
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "email_variants"
+        indexes = [
+            "campaign_id"
+        ]
+
+class EmailSendingQueue(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    campaign_id: uuid.UUID
+    user_id: uuid.UUID
+    template_id: uuid.UUID
+    status: str = "pending"
+    priority: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "email_sending_queue"
+        indexes = [
+            "status",
+            "campaign_id", "user_id", "template_id"
+        ]
+
+class UserNote(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    user_id: uuid.UUID
+    content: str
+    created_by_id: uuid.UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "user_notes"
+        indexes = [
+            "user_id"
+        ]
+
+class ContactList(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    name: str
+    description: Optional[str] = None
+    owner_id: uuid.UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "contact_lists"
+        indexes = [
+            "name",
+            "owner_id"
+        ]
+
+class Contact(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    contact_list_id: uuid.UUID
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    attributes: dict = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "contacts"
+        indexes = [
+            "email",
+            "contact_list_id"
+        ]
+
+class CRMLeadStage(str, enum.Enum):
+    LEAD = "lead"
+    CALL = "call"
+    MEETING = "meeting"
+    PROPOSAL = "proposal"
+    NEGOTIATION = "negotiation"
+    PROJECT = "project"
+    WON = "won"
+    LOST = "lost"
+
+class Lead(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    contact_id: Optional[uuid.UUID] = None # Optional now as leads can come directly
+    company_name: str = "TBD"
+    source: str = "Marketing"
+    stage: CRMLeadStage = Field(default=CRMLeadStage.LEAD)
     
-    retry_config: Mapped[dict] = mapped_column(
-        JSONB, 
-        default=lambda: {
-            "enabled": True,
-            "first_retry_hours": 48,
-            "second_retry_hours": 72,
-            "third_retry_hours": 120
-        }
-    )
-    warmup_config: Mapped[dict] = mapped_column(
-        JSONB, 
-        default=lambda: {
-            "enabled": True,
-            "start_limit": 10,
-            "daily_increment": 5,
-            "max_volume": 1000,
-            "current_limit": 10
-        }
-    )
-    warmup_last_limit_increase: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    owner_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
-    contact_list_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("contact_lists.id", ondelete="SET NULL"), nullable=True
-    )
+    # Assignment
+    assigned_to_id: Optional[uuid.UUID] = None
+    assigned_by_id: Optional[uuid.UUID] = None
     
-    owner: Mapped["User"] = relationship("User")
-    contact_list: Mapped[Optional["ContactList"]] = relationship("ContactList")
-    workflow: Mapped[Optional["Workflow"]] = relationship("Workflow", back_populates="campaign", uselist=False)
-
-class Workflow(Base, TimestampMixin):
-    __tablename__ = "workflows"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    name: Mapped[str] = mapped_column(String(255), unique=True)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    campaign_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True
-    )
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    campaign: Mapped[Optional[Campaign]] = relationship("Campaign", back_populates="workflow")
-    nodes: Mapped[list["WorkflowNode"]] = relationship(
-        "WorkflowNode", back_populates="workflow", cascade="all, delete-orphan"
-    )
-
-class WorkflowNode(Base, TimestampMixin):
-    __tablename__ = "workflow_nodes"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    workflow_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="CASCADE")
-    )
-    type: Mapped[str] = mapped_column(String(50)) # start, email, delay, condition, end
-    config: Mapped[dict] = mapped_column(JSONB)
-
-    workflow: Mapped[Workflow] = relationship("Workflow", back_populates="nodes")
-    outgoing_edges: Mapped[list["WorkflowEdge"]] = relationship(
-        "WorkflowEdge", foreign_keys="WorkflowEdge.from_node_id", back_populates="from_node"
-    )
-    incoming_edges: Mapped[list["WorkflowEdge"]] = relationship(
-        "WorkflowEdge", foreign_keys="WorkflowEdge.to_node_id", back_populates="to_node"
-    )
-
-class WorkflowEdge(Base, TimestampMixin):
-    __tablename__ = "workflow_edges"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    workflow_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="CASCADE")
-    )
-    from_node_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_nodes.id", ondelete="CASCADE")
-    )
-    to_node_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_nodes.id", ondelete="CASCADE")
-    )
-    condition: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-
-    from_node: Mapped[WorkflowNode] = relationship(
-        "WorkflowNode", foreign_keys=[from_node_id], back_populates="outgoing_edges"
-    )
-    to_node: Mapped[WorkflowNode] = relationship(
-        "WorkflowNode", foreign_keys=[to_node_id], back_populates="incoming_edges"
-    )
-
-    __table_args__ = (
-        UniqueConstraint("from_node_id", "to_node_id", name="uq_workflow_edge_path"),
-    )
-
-class EmailTemplate(Base, TimestampMixin):
-    __tablename__ = "email_templates"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    name: Mapped[str] = mapped_column(String(255), unique=True)
-    subject: Mapped[str] = mapped_column(String(255))
-    html_body: Mapped[str] = mapped_column(Text)
-
-class EmailSend(Base, TimestampMixin):
-    __tablename__ = "email_sends"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    template_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("email_templates.id", ondelete="SET NULL"), nullable=True
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
-    )
-    campaign_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True
-    )
-    workflow_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
-    )
-    workflow_step_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True
-    )
-    to_email: Mapped[str] = mapped_column(String(255))
-    status: Mapped[str] = mapped_column(String(50), default="queued")
-    provider_message_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    unsubscribe_token: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), unique=True, default=uuid.uuid4
-    )
-    variant_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("email_variants.id", ondelete="SET NULL"), nullable=True
-    )
-    variant_letter: Mapped[Optional[str]] = mapped_column(String(1), nullable=True)
-    data: Mapped[Optional[dict]] = mapped_column("metadata", JSONB, nullable=True)
-
-    template: Mapped[Optional[EmailTemplate]] = relationship("EmailTemplate")
-    user: Mapped[User] = relationship("User")
-    campaign: Mapped[Optional[Campaign]] = relationship("Campaign")
-    workflow: Mapped[Optional[Workflow]] = relationship("Workflow")
-
-    __table_args__ = (
-        Index("ix_email_sends_status_created", "status", sa.literal_column("created_at DESC")),
-        Index("ix_email_sends_campaign_status", "campaign_id", "status"),
-    )
-
-class Event(Base, TimestampMixin):
-    __tablename__ = "events"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    type: Mapped[str] = mapped_column(String(50), index=True) # sent, opened, clicked, bounced
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
-    )
-    campaign_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True
-    )
-    workflow_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
-    )
-    workflow_step_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True
-    )
-    email_send_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("email_sends.id", ondelete="SET NULL"), nullable=True
-    )
-    data: Mapped[Optional[dict]] = mapped_column("metadata", JSONB, nullable=True)
-
-    user: Mapped[User] = relationship("User")
-    email_send: Mapped[Optional["EmailSend"]] = relationship("EmailSend")
-
-    __table_args__ = (
-        Index("ix_events_campaign_type_created", "campaign_id", "type", sa.literal_column("created_at DESC")),
-        Index("ix_events_user_type_created", "user_id", "type", sa.literal_column("created_at DESC")),
-        Index("ix_events_email_send_type", "email_send_id", "type"),
-        Index("ix_events_created_at", sa.literal_column("created_at DESC")),
-    )
-
-class LeadScore(Base, TimestampMixin):
-    __tablename__ = "lead_scores"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True
-    )
-    score: Mapped[int] = mapped_column(Integer, default=0)
-
-    user: Mapped[User] = relationship("User")
-
-class Pipeline(Base, TimestampMixin):
-    __tablename__ = "pipelines"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    name: Mapped[str] = mapped_column(String(255), unique=True)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-class PipelineItem(Base, TimestampMixin):
-    __tablename__ = "pipeline_items"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    pipeline_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("pipelines.id", ondelete="CASCADE")
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
-    )
-    stage: Mapped[str] = mapped_column(String(50)) # lead, prospect, qualified, closed
+    # Metadata
+    proposal_deadline: Optional[datetime] = None
+    deal_value: float = 0.0
+    last_activity_at: datetime = Field(default_factory=utcnow)
     
-    user: Mapped[User] = relationship("User")
-
-class WorkflowInstance(Base, TimestampMixin):
-    __tablename__ = "workflow_instances"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    workflow_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="CASCADE")
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
-    )
-    status: Mapped[str] = mapped_column(String(50), default="pending")
-
-    workflow: Mapped[Workflow] = relationship("Workflow")
-    user: Mapped[User] = relationship("User")
-
-    __table_args__ = (
-        Index("ix_workflow_instances_status_updated", "status", sa.literal_column("updated_at DESC")),
-        Index("ix_workflow_instances_workflow_status", "workflow_id", "status"),
-    )
-
-class WorkflowStep(Base, TimestampMixin):
-    __tablename__ = "workflow_steps"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    instance_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_instances.id", ondelete="CASCADE")
-    )
-    node_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_nodes.id", ondelete="SET NULL"), nullable=True
-    )
-    status: Mapped[str] = mapped_column(String(50), default="pending")
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    __table_args__ = (
-        Index("ix_workflow_steps_instance_status", "instance_id", "status"),
-        Index("ix_workflow_steps_node_status", "node_id", "status"),
-    )
-
-class WorkflowInstanceData(Base, TimestampMixin):
-    __tablename__ = "workflow_instance_data"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    instance_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_instances.id", ondelete="CASCADE"), unique=True
-    )
-    data: Mapped[dict] = mapped_column(JSONB, default=dict)
-
-class WorkflowSnapshot(Base, TimestampMixin):
-    __tablename__ = "workflow_snapshots"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    instance_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_instances.id", ondelete="CASCADE"), index=True
-    )
-    step_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_steps.id", ondelete="CASCADE"), index=True
-    )
-    node_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_nodes.id", ondelete="SET NULL"), nullable=True
-    )
-    data_snapshot: Mapped[dict] = mapped_column(JSONB)
-    condition_result: Mapped[dict] = mapped_column(JSONB)
-
-class ConditionEvaluationLog(Base, TimestampMixin):
-    __tablename__ = "condition_evaluation_logs"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    instance_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_instances.id", ondelete="CASCADE"), index=True
-    )
-    node_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_nodes.id", ondelete="CASCADE"), index=True
-    )
-    evaluation_result: Mapped[bool] = mapped_column(Boolean)
-    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-class EmailVariant(Base, TimestampMixin):
-    __tablename__ = "email_variants"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    campaign_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True
-    )
-    workflow_step_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("workflow_steps.id", ondelete="CASCADE"), nullable=True
-    )
-    subject: Mapped[str] = mapped_column(String(255))
-    html_body: Mapped[str] = mapped_column(Text)
-    weight: Mapped[float] = mapped_column(sa.Float, default=0.5)
-
-class EmailSendingQueue(Base, TimestampMixin):
-    __tablename__ = "email_sending_queue"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    campaign_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE")
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
-    )
-    template_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("email_templates.id", ondelete="CASCADE")
-    )
-    status: Mapped[str] = mapped_column(String(50), default="pending")
-    priority: Mapped[int] = mapped_column(Integer, default=0)
-
-class UserNote(Base, TimestampMixin):
-    __tablename__ = "user_notes"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
-    content: Mapped[str] = mapped_column(Text)
-    created_by_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
-    )
-
-class ContactList(Base, TimestampMixin):
-    __tablename__ = "contact_lists"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    name: Mapped[str] = mapped_column(String(255), index=True)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    owner_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
-    )
-
-    # Relationships
-    contacts: Mapped[list["Contact"]] = relationship("Contact", back_populates="contact_list", cascade="all, delete-orphan")
-
-class Contact(Base, TimestampMixin):
-    __tablename__ = "contacts"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    contact_list_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("contact_lists.id", ondelete="CASCADE"), index=True
-    )
-    email: Mapped[str] = mapped_column(String(255), index=True)
-    first_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    last_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    attributes: Mapped[dict] = mapped_column(JSONB, default=dict)
-
-    # Relationships
-    contact_list: Mapped["ContactList"] = relationship("ContactList", back_populates="contacts")
-    lead: Mapped[Optional["Lead"]] = relationship("Lead", back_populates="contact", uselist=False)
-
-    __table_args__ = (
-        Index("ix_contacts_list_email", "contact_list_id", "email"),
-    )
-
-class Lead(Base, TimestampMixin):
-    __tablename__ = "leads"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    contact_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("contacts.id", ondelete="CASCADE"), unique=True, index=True
-    )
+    # Existing fields for marketing health (keeping compatibility)
+    lead_status: LeadStatusEnum = LeadStatusEnum.new
+    lead_score: int = 0
+    claimed_at: Optional[datetime] = None
+    last_contacted_at: Optional[datetime] = None
+    last_email_opened_at: Optional[datetime] = None
+    last_link_clicked_at: Optional[datetime] = None
     
-    # Lead-specific fields
-    lead_status: Mapped[LeadStatusEnum] = mapped_column(
-        SaEnum(LeadStatusEnum, name="leadstatusenum", create_type=False), 
-        default=LeadStatusEnum.new, 
-        index=True
-    )
-    lead_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    
-    # Assignment & ownership
-    assigned_to_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    
-    # Engagement tracking
-    last_contacted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_email_opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_link_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    
-    # Relationships
-    contact: Mapped["Contact"] = relationship("Contact", back_populates="lead")
-    assigned_to: Mapped[Optional["User"]] = relationship(
-        "User", foreign_keys=[assigned_to_id], back_populates="assigned_leads"
-    )
-    notes: Mapped[list["LeadNote"]] = relationship("LeadNote", back_populates="lead", cascade="all, delete-orphan")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    __table_args__ = (
-        Index("ix_leads_status_score", "lead_status", sa.literal_column("lead_score DESC")),
-        Index("ix_leads_assigned_to", "assigned_to_id", postgresql_where=sa.literal_column("assigned_to_id IS NOT NULL")),
-    )
+    class Settings:
+        name = "leads"
+        indexes = [
+            # Removing unique constraint on contact_id since we might have empty or duplicate entries during migration
+            "stage",
+            "assigned_to_id",
+            "company_name"
+        ]
 
-class EmailRetryAttempt(Base, TimestampMixin):
-    __tablename__ = "email_retry_attempts"
+class EmailRetryAttempt(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    event_id: uuid.UUID
+    attempt_number: int
+    scheduled_for: datetime
+    status: str = "pending"
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    event_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("events.id", ondelete="CASCADE")
-    )
-    attempt_number: Mapped[int] = mapped_column(Integer)
-    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    status: Mapped[str] = mapped_column(String(50), default="pending")
+    class Settings:
+        name = "email_retry_attempts"
+        indexes = [
+            "event_id"
+        ]
 
-class Setting(Base, TimestampMixin):
-    __tablename__ = "settings"
+class Setting(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    key: str
+    value: dict
+    category: Optional[str] = None
+    description: Optional[str] = None
+    is_encrypted: bool = False
+    updated_by_id: Optional[uuid.UUID] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    key: Mapped[str] = mapped_column(String(100), unique=True)
-    value: Mapped[dict] = mapped_column(JSONB)
-    category: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
-    updated_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    class Settings:
+        name = "settings"
+        indexes = [
+            pymongo.IndexModel([("key", pymongo.ASCENDING)], unique=True),
+            "category"
+        ]
 
-class Role(Base, TimestampMixin):
-    __tablename__ = "roles"
+class Role(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    name: str
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    name: Mapped[str] = mapped_column(String(50), unique=True)
+    class Settings:
+        name = "roles"
+        indexes = [
+            pymongo.IndexModel([("name", pymongo.ASCENDING)], unique=True)
+        ]
 
-class UserRole(Base, TimestampMixin):
-    __tablename__ = "user_roles"
+class LeadNote(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    lead_id: uuid.UUID
+    user_id: Optional[uuid.UUID] = None
+    content: str
+    is_system: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
-    )
-    role_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE")
-    )
+    class Settings:
+        name = "lead_notes"
+        indexes = [
+            "lead_id"
+        ]
 
-    user: Mapped[User] = relationship("User", back_populates="roles")
-    role: Mapped[Role] = relationship("Role")
+class ActivityType(str, enum.Enum):
+    CALL = "call"
+    MEETING = "meeting"
+    NOTE = "note"
+    EMAIL = "email"
+    SYSTEM = "system"
+    PROPOSAL = "proposal"
+    REPLY = "reply"
+    FORM = "form"
 
-    __table_args__ = (UniqueConstraint("user_id", "role_id", name="uq_user_role"),)
+class TaskStatus(str, enum.Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
+class CRMActivity(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    lead_id: uuid.UUID
+    user_id: Optional[uuid.UUID] = None
+    type: ActivityType
+    content: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-class LeadNote(Base, TimestampMixin):
-    __tablename__ = "lead_notes"
+    class Settings:
+        name = "crm_activities"
+        indexes = [
+            "lead_id",
+            "user_id",
+            "type"
+        ]
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    lead_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("leads.id", ondelete="CASCADE"), index=True
-    )
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
-    content: Mapped[str] = mapped_column(Text)
-    is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+class CRMTask(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    lead_id: uuid.UUID
+    assigned_to_id: Optional[uuid.UUID] = None
+    title: str
+    description: Optional[str] = None
+    due_date: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    status: TaskStatus = TaskStatus.PENDING
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
-    lead: Mapped["Lead"] = relationship("Lead", back_populates="notes")
-    user: Mapped[Optional["User"]] = relationship("User")
+class CRMTarget(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    month: str  # Format "YYYY-MM"
+    user_id: Optional[uuid.UUID] = None  # None for overall team target
+    revenue_target: float = 0.0
+    calls_target: int = 0
+    proposals_target: int = 0
+    meetings_target: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "crm_targets"
+        indexes = [
+            "month",
+            "user_id"
+        ]
+
+class CRMNotification(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    user_id: uuid.UUID
+    title: str
+    message: str
+    type: str = "info" # "info", "warning", "success", "error"
+    link: Optional[str] = None
+    is_read: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "crm_notifications"
+        indexes = [
+            "user_id",
+            "is_read",
+            "created_at"
+        ]
+
+class OAuthToken(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    user_id: uuid.UUID
+    provider: str  # e.g., "google"
+    token_data: dict  # Full JSON response from OAuth provider
+    scopes: List[str]
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "oauth_tokens"
+        indexes = [
+            "user_id",
+            "provider"
+        ]
+
+class GlobalMetrics(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    user_id: Optional[uuid.UUID] = None
+    type: str = "dashboard"
+    data: dict
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "global_metrics"
+        indexes = [
+            "user_id",
+            "type",
+            "updated_at"
+        ]
+
+__beanie_models__ = [
+    User, UserAttribute, Campaign, Workflow, WorkflowNode, WorkflowEdge,
+    EmailTemplate, EmailSend, Event, LeadScore, Pipeline, PipelineItem,
+    WorkflowInstance, WorkflowStep, WorkflowInstanceData, WorkflowSnapshot,
+    ConditionEvaluationLog, EmailVariant, EmailSendingQueue, UserNote,
+    ContactList, Contact, Lead, EmailRetryAttempt, Setting, Role, LeadNote,
+    CRMActivity, CRMTask, CRMTarget, CRMNotification, OAuthToken,
+    GlobalMetrics
+]

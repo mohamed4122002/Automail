@@ -1,5 +1,13 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
+from .db import init_db, close_db
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+    await close_db()
 
 from .config import settings
 from .logging_config import setup_logging
@@ -17,7 +25,7 @@ from .api import templates as templates_api
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.APP_NAME)
+    app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
@@ -41,9 +49,17 @@ def create_app() -> FastAPI:
     from .api import users as users_api
     api_router.include_router(users_api.router)
 
+    # Admin Router
+    from .api import admin as admin_api
+    api_router.include_router(admin_api.router)
+
     # Contacts Router
     from .api import contacts as contacts_api
     api_router.include_router(contacts_api.router)
+
+    # Notifications Router
+    from .api import notifications as notifications_api
+    api_router.include_router(notifications_api.router)
 
     # Leads Router
     from .api import leads as leads_api
@@ -98,6 +114,14 @@ def create_app() -> FastAPI:
     # System Health Router
     from .api import system as system_api
     api_router.include_router(system_api.router)
+
+    # Integrations Router
+    from .api import integrations as integrations_api
+    api_router.include_router(integrations_api.router)
+
+    # Inbound Router (Forms/Webhooks)
+    from .api import inbound as inbound_api
+    api_router.include_router(inbound_api.router)
 
     app.include_router(api_router)
 

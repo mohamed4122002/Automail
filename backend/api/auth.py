@@ -1,14 +1,11 @@
 from datetime import timedelta
 
-import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import authenticate_user, create_access_token, get_password_hash
+from ..auth import authenticate_user, create_access_token, get_password_hash, get_current_active_user
 from ..config import settings
-from ..db import get_db
 from ..models import User
 
 
@@ -30,9 +27,8 @@ class UserCreate(BaseModel):
 @router.post("/token", response_model=TokenResponse)
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
-    db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
-    user = await authenticate_user(db, form_data.username, form_data.password)
+    user = await authenticate_user(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -50,12 +46,10 @@ async def login_for_access_token(
 
 @router.post("/users", response_model=TokenResponse, status_code=201)
 async def register_user(
-    payload: UserCreate, db: AsyncSession = Depends(get_db)
+    payload: UserCreate
 ) -> TokenResponse:
-    existing = await db.execute(
-        sa.select(User).where(User.email == payload.email)  # type: ignore[name-defined]
-    )
-    if existing.scalar_one_or_none():
+    existing = await User.find_one(User.email == payload.email)
+    if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
@@ -66,9 +60,12 @@ async def register_user(
         first_name=payload.first_name,
         last_name=payload.last_name,
     )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
+    await user.insert()
     access_token = create_access_token(data={"sub": str(user.id)})
     return TokenResponse(access_token=access_token)
 
+
+@router.get("/me", response_model=User)
+async def get_my_profile(user: User = Depends(get_current_active_user)):
+    """Get the current logged-in user's profile."""
+    return user

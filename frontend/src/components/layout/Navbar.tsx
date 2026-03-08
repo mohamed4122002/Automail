@@ -13,6 +13,9 @@ import { monitoringService, HealthStatus } from "../../services/monitoring";
 import { Activity, Database, Zap, Cpu } from "lucide-react";
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
+import NotificationCenter from "../dashboard/NotificationCenter";
+import { useQuery } from "@tanstack/react-query";
+import api from "../../lib/api";
 
 const HealthIndicator: React.FC = () => {
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -37,8 +40,9 @@ const HealthIndicator: React.FC = () => {
 
   if (loading && !health) return null;
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
+  const getStatusColor = (status: any) => {
+    const s = typeof status === 'string' ? status : status?.status;
+    switch (s) {
       case 'healthy': return 'bg-emerald-500';
       case 'unhealthy': return 'bg-red-500';
       case 'degraded': return 'bg-amber-500';
@@ -56,7 +60,7 @@ const HealthIndicator: React.FC = () => {
             <span className="text-[10px] font-medium text-slate-400">DB</span>
           </TooltipTrigger>
           <TooltipContent>
-            PostgreSQL: <span className="font-bold uppercase">{health?.services.postgres || 'unknown'}</span>
+            PostgreSQL: <span className="font-bold uppercase">{typeof health?.services.postgres === 'string' ? health?.services.postgres : health?.services.postgres?.status || 'unknown'}</span>
           </TooltipContent>
         </Tooltip>
 
@@ -69,7 +73,7 @@ const HealthIndicator: React.FC = () => {
             <span className="text-[10px] font-medium text-slate-400">Cache</span>
           </TooltipTrigger>
           <TooltipContent>
-            Redis: <span className="font-bold uppercase">{health?.services.redis || 'unknown'}</span>
+            Redis: <span className="font-bold uppercase">{health?.services.redis?.status || 'unknown'}</span>
           </TooltipContent>
         </Tooltip>
 
@@ -82,7 +86,7 @@ const HealthIndicator: React.FC = () => {
             <span className="text-[10px] font-medium text-slate-400">Worker</span>
           </TooltipTrigger>
           <TooltipContent>
-            Celery: <span className="font-bold uppercase">{health?.services.celery || 'unknown'}</span>
+            Celery: <span className="font-bold uppercase">{health?.services.celery?.status || 'unknown'}</span>
           </TooltipContent>
         </Tooltip>
       </div>
@@ -119,6 +123,17 @@ export const Navbar: React.FC<NavbarProps> = ({ onMenuClick, title }) => {
     navigate("/login");
   };
 
+  const { data: notifications } = useQuery({
+    queryKey: ['notifications'],
+    queryFn: async () => {
+      const res = await api.get('/notifications');
+      return res.data;
+    },
+    refetchInterval: 60000,
+  });
+
+  const unreadCount = notifications?.filter((n: any) => !n.is_read).length || 0;
+
   return (
     <header className="sticky top-0 z-30 flex items-center justify-between h-16 px-4 bg-slate-900/80 backdrop-blur-md border-b border-slate-800 sm:px-6 lg:px-8">
       <div className="flex items-center gap-4">
@@ -149,19 +164,12 @@ export const Navbar: React.FC<NavbarProps> = ({ onMenuClick, title }) => {
               className="p-2 text-slate-400 rounded-full hover:bg-slate-800 hover:text-slate-100 transition-colors relative"
             >
               <Bell className="w-5 h-5" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-slate-900" />
+              {unreadCount > 0 && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-slate-900 shadow-[0_0_8px_rgba(239,68,68,0.5)]" />
+              )}
             </button>
 
-            {showNotifications && (
-              <div className="absolute right-0 mt-2 w-80 bg-slate-900 border border-slate-800 rounded-lg shadow-xl py-2 animate-in fade-in slide-in-from-top-2">
-                <div className="px-4 py-2 border-b border-slate-800">
-                  <h3 className="text-sm font-semibold text-slate-100">Notifications</h3>
-                </div>
-                <div className="py-2">
-                  <p className="px-4 py-3 text-sm text-slate-400 text-center">No new notifications</p>
-                </div>
-              </div>
-            )}
+            {showNotifications && <NotificationCenter />}
           </div>
 
           {/* User Profile */}

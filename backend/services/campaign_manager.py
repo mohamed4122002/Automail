@@ -1,6 +1,4 @@
 import logging
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -10,43 +8,26 @@ from ..tasks import advance_workflow_task
 logger = logging.getLogger(__name__)
 
 class CampaignManagerService:
-    def __init__(self, db: AsyncSession):
-        self.db = db
+    def __init__(self):
+        pass
 
     async def activate_campaign(self, campaign_id: UUID, owner_id: UUID) -> dict:
-        """
-        Activates a campaign:
-        1. Validates campaign, contact list, and workflow.
-        2. Syncs contacts to leads and shadow users.
-        3. Spawns workflow instances.
-        """
         from ..api.realtime import broadcast_event
-        # Fetch campaign with workflow
-        q = await self.db.execute(
-            sa.select(Campaign).where(Campaign.id == campaign_id)
-        )
-        campaign = q.scalar_one_or_none()
         
+        campaign = await Campaign.find_one(Campaign.id == campaign_id)
         if not campaign:
             raise ValueError("Campaign not found")
         
         if not campaign.contact_list_id:
             raise ValueError("No contact list selected for this campaign")
             
-        # Check associated workflow
-        q_wf = await self.db.execute(
-            sa.select(Workflow).where(Workflow.campaign_id == campaign_id)
-        )
-        workflow = q_wf.scalar_one_or_none()
-        
+        workflow = await Workflow.find_one(Workflow.campaign_id == campaign_id)
         if not workflow:
             raise ValueError("No workflow associated with this campaign")
 
-        # 1. Update Campaign status
         campaign.is_active = True
-        await self.db.flush()
+        await campaign.save()
 
-        # Broadcast activation
         await broadcast_event({
             "type": "event",
             "event_type": "campaign_activated",
@@ -55,30 +36,20 @@ class CampaignManagerService:
             "timestamp": datetime.utcnow().isoformat()
         })
 
-        # 2. Get contacts in the list
-        q_contacts = await self.db.execute(
-            sa.select(Contact).where(Contact.contact_list_id == campaign.contact_list_id)
-        )
-        contacts = q_contacts.scalars().all()
+        contacts = await Contact.find(Contact.contact_list_id == campaign.contact_list_id).to_list()
         
         if not contacts:
-            return {"message": "Campaign activated (0 contacts found)", "campaign_id": campaign_id}
+            return {"message": "Campaign activated (0 contacts found)", "campaign_id": str(campaign_id)}
 
-        # 3. Process each contact: Sync Leads, Shadow Users & Reconcile Workflows
         instances_started = 0
         tasks_to_run = []
         
-        # We'll batch leads/users creations for efficiency in a real system, 
-        # but for this systematization, focus is on logic correctness first.
         for contact in contacts:
             task = await self._reconcile_contact_workflow(contact, workflow)
             if task:
                 tasks_to_run.append(task)
                 instances_started += 1
 
-        await self.db.commit()
-
-        # Execute all tasks in parallel
         if tasks_to_run:
             logger.info(f"Dispatching {len(tasks_to_run)} workflow tasks in parallel")
             from celery import group
@@ -94,59 +65,43 @@ class CampaignManagerService:
         }
 
     async def _reconcile_contact_workflow(self, contact: Contact, workflow: Workflow):
-        """Idempotent reconciliation of a single contact's workflow state."""
-        # A. Ensure Lead & Shadow User exist (Standardized Setup)
         user = await self._ensure_shadow_user(contact)
         await self._ensure_lead(contact)
         
-        # B. Fetch existing instance
-        q = await self.db.execute(
-            sa.select(WorkflowInstance).where(
-                WorkflowInstance.workflow_id == workflow.id,
-                WorkflowInstance.user_id == user.id
-            )
+        instance = await WorkflowInstance.find_one(
+            WorkflowInstance.workflow_id == workflow.id,
+            WorkflowInstance.user_id == user.id
         )
-        instance = q.scalar_one_or_none()
         
-        # C. State Machine Logic
         if not instance:
             instance = WorkflowInstance(
                 workflow_id=workflow.id,
                 user_id=user.id,
                 status="pending"
             )
-            self.db.add(instance)
-            await self.db.flush()
+            await instance.insert()
             return advance_workflow_task.s(str(instance.id), None)
 
         if instance.status == "pending":
             return advance_workflow_task.s(str(instance.id), None)
 
         if instance.status == "running":
-            # Check for staleness (Systematized Recovery)
-            # If no updates in 15 mins, assume worker died or task lost
-            if instance.updated_at < (datetime.utcnow() - timedelta(minutes=15)):
+            if getattr(instance, 'updated_at', datetime.utcnow()) < (datetime.utcnow() - timedelta(minutes=15)):
                 logger.warning(f"Recovering stale instance {instance.id}")
-                # We restart from current position or start
-                # For simplicity in this engine, we re-trigger advance from None (start) 
-                # or we can look up last successful step. Re-triggering from start 
-                # is safer for idempotency if steps check for existence.
                 return advance_workflow_task.s(str(instance.id), None)
             return None
 
         if instance.status in ["completed", "failed", "terminated"]:
-            # Systematized Restart: Only if explicitly re-activating
             logger.info(f"Restarting terminal instance {instance.id}")
             instance.status = "pending"
             instance.updated_at = datetime.utcnow()
-            await self.db.flush()
+            await instance.save()
             return advance_workflow_task.s(str(instance.id), None)
 
         return None
 
     async def _ensure_shadow_user(self, contact: Contact) -> User:
-        q = await self.db.execute(sa.select(User).where(User.email == contact.email))
-        user = q.scalar_one_or_none()
+        user = await User.find_one(User.email == contact.email)
         if not user:
             user = User(
                 email=contact.email,
@@ -155,36 +110,29 @@ class CampaignManagerService:
                 last_name=contact.last_name,
                 is_active=False
             )
-            self.db.add(user)
-            await self.db.flush()
+            await user.insert()
         return user
 
     async def _ensure_lead(self, contact: Contact) -> Lead:
-        q = await self.db.execute(sa.select(Lead).where(Lead.contact_id == contact.id))
-        lead = q.scalar_one_or_none()
+        lead = await Lead.find_one(Lead.contact_id == contact.id)
         if not lead:
             lead = Lead(
                 contact_id=contact.id,
                 lead_status=LeadStatusEnum.new,
                 lead_score=0
             )
-            self.db.add(lead)
-            await self.db.flush()
+            await lead.insert()
         return lead
 
     async def pause_campaign(self, campaign_id: UUID) -> dict:
-        """Pauses a campaign."""
         from ..api.realtime import broadcast_event
-        q = await self.db.execute(
-            sa.select(Campaign).where(Campaign.id == campaign_id)
-        )
-        campaign = q.scalar_one_or_none()
+        campaign = await Campaign.find_one(Campaign.id == campaign_id)
         if not campaign:
             raise ValueError("Campaign not found")
         
         campaign.is_active = False
+        await campaign.save()
         
-        # Broadcast pause
         await broadcast_event({
             "type": "event",
             "event_type": "campaign_paused",
@@ -193,48 +141,28 @@ class CampaignManagerService:
             "timestamp": datetime.utcnow().isoformat()
         })
         
-        await self.db.commit()
-        
         return {"message": "Campaign paused", "campaign_id": str(campaign_id)}
 
     async def update_workflow(self, campaign_id: UUID, new_workflow_id: UUID) -> dict:
-        """
-        Swaps the workflow for a campaign.
-        1. Validates new workflow.
-        2. Unlinks old workflow.
-        3. Links new workflow.
-        4. Broadcasts update.
-        """
         from ..api.realtime import broadcast_event
         
-        # 1. Fetch Campaign
-        q = await self.db.execute(
-            sa.select(Campaign).where(sa.Campaign.id == campaign_id)
-        )
-        campaign = q.scalar_one_or_none()
+        campaign = await Campaign.find_one(Campaign.id == campaign_id)
         if not campaign:
             raise ValueError("Campaign not found")
 
-        # 2. Fetch New Workflow
-        q_wf = await self.db.execute(
-            sa.select(Workflow).where(Workflow.id == new_workflow_id)
-        )
-        new_workflow = q_wf.scalar_one_or_none()
+        new_workflow = await Workflow.find_one(Workflow.id == new_workflow_id)
         if not new_workflow:
             raise ValueError("New workflow not found")
 
-        # 3. Unlink existing workflows for this campaign
-        await self.db.execute(
-            sa.update(Workflow)
-            .where(Workflow.campaign_id == campaign_id)
-            .values(campaign_id=None)
-        )
+        # Unlink existing workflows for this campaign
+        old_workflows = await Workflow.find(Workflow.campaign_id == campaign_id).to_list()
+        for wf in old_workflows:
+            wf.campaign_id = None
+            await wf.save()
 
-        # 4. Link new workflow
         new_workflow.campaign_id = campaign_id
-        await self.db.flush()
+        await new_workflow.save()
 
-        # 5. Broadcast configuration update
         await broadcast_event({
             "type": "event",
             "event_type": "campaign_config_updated",
@@ -244,36 +172,24 @@ class CampaignManagerService:
             "timestamp": datetime.utcnow().isoformat()
         })
 
-        await self.db.commit()
-
         return {
             "message": "Workflow updated successfully",
             "campaign_id": str(campaign_id),
             "workflow_id": str(new_workflow_id),
             "workflow_name": new_workflow.name
         }
+
     async def get_workflow_health(self) -> dict:
-        """Analyzes workflow health, detecting stalled or hung instances."""
-        q_stats = await self.db.execute(
-            sa.select(WorkflowInstance.status, sa.func.count(WorkflowInstance.id))
-            .group_by(WorkflowInstance.status)
-        )
-        stats = {status: count for status, count in q_stats.all()}
-        
-        # Detect stalled: running status but no steps updated in last 1 hour
-        # or stuck after a completed step
-        from datetime import timedelta
+        instances = await WorkflowInstance.find_all().to_list()
+        stats = {}
+        stalled_count = 0
         hour_ago = datetime.utcnow() - timedelta(hours=1)
         
-        q_stalled = await self.db.execute(
-            sa.select(sa.func.count(WorkflowInstance.id))
-            .where(
-                WorkflowInstance.status == "running",
-                WorkflowInstance.updated_at < hour_ago
-            )
-        )
-        stalled_count = q_stalled.scalar_one() or 0
-        
+        for i in instances:
+            stats[i.status] = stats.get(i.status, 0) + 1
+            if i.status == "running" and getattr(i, 'updated_at', datetime.utcnow()) < hour_ago:
+                stalled_count += 1
+                
         return {
             "stats": stats,
             "stalled_count": stalled_count,
@@ -281,23 +197,14 @@ class CampaignManagerService:
         }
 
     async def repair_stalled_instances(self) -> dict:
-        """Systematically repairs and re-triggers stalled workflow instances."""
         from ..tasks import advance_workflow_task
-        from ..models import WorkflowStep, WorkflowNode
+        from ..models import WorkflowStep
         
-        q = await self.db.execute(
-            sa.select(WorkflowInstance).where(WorkflowInstance.status == "running")
-        )
-        instances = q.scalars().all()
+        running_instances = await WorkflowInstance.find(WorkflowInstance.status == "running").to_list()
         
         repaired = 0
-        for i in instances:
-            steps_q = await self.db.execute(
-                sa.select(WorkflowStep)
-                .where(WorkflowStep.instance_id == i.id)
-                .order_by(WorkflowStep.started_at.desc())
-            )
-            steps = steps_q.scalars().all()
+        for i in running_instances:
+            steps = await WorkflowStep.find(WorkflowStep.instance_id == i.id).sort("-started_at").to_list()
             
             if not steps:
                 advance_workflow_task.delay(str(i.id), None)
@@ -309,10 +216,9 @@ class CampaignManagerService:
                 advance_workflow_task.delay(str(i.id), str(last_step.node_id))
                 repaired += 1
             elif last_step.status in ["running", "pending"]:
-                # Check age
-                if last_step.started_at < (datetime.utcnow() - timedelta(minutes=15)):
+                if getattr(last_step, 'started_at', datetime.utcnow()) < (datetime.utcnow() - timedelta(minutes=15)):
                     last_step.status = "failed"
-                    await self.db.commit()
+                    await last_step.save()
                     advance_workflow_task.delay(str(i.id), str(last_step.node_id))
                     repaired += 1
                     

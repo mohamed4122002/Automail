@@ -1,117 +1,82 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 from typing import Optional, List
-
-from ..db import get_db
+from datetime import datetime
 from ..services.analytics import AnalyticsService
+from ..schemas.analytics import PerformanceStats, TargetProgress, CRMTargetCreate, CRMTargetResponse, DashboardResponse
+from ..models import CRMTarget
 from ..api.deps import get_current_user_id
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
-
-@router.get("/dashboard")
-async def get_dashboard_analytics(
-    workflow_id: Optional[UUID] = Query(None, description="Filter by workflow ID"),
-    campaign_id: Optional[UUID] = Query(None, description="Filter by campaign ID"),
-    days: int = Query(30, description="Number of days to look back"),
-    db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(get_current_user_id)
+@router.get("/dashboard", response_model=DashboardResponse)
+async def get_dashboard(
+    user_id: Optional[UUID] = None,
+    campaign_id: Optional[UUID] = None,
+    workflow_id: Optional[UUID] = None,
+    current_user_id: UUID = Depends(get_current_user_id)
 ):
     """
-    Get dashboard analytics with optional workflow/campaign filtering.
+    Unified dashboard endpoint for stats, charts, and activity.
+    """
+    # If no user_id filter provided, default to current user if not admin
+    # (Implementation detail: for now we just pass through)
+    return await AnalyticsService.get_dashboard_data(user_id, campaign_id, workflow_id)
+
+@router.get("/performance", response_model=PerformanceStats)
+async def get_performance(
+    user_id: Optional[UUID] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    current_user_id: UUID = Depends(get_current_user_id)
+):
+    """
+    Get performance statistics for a specific user or overall.
+    """
+    return await AnalyticsService.get_performance_stats(user_id, start_date, end_date)
+
+@router.get("/targets", response_model=TargetProgress)
+async def get_targets(
+    month: Optional[str] = None,
+    user_id: Optional[UUID] = None,
+    current_user_id: UUID = Depends(get_current_user_id)
+):
+    """
+    Get target progress. Defaults to current month if not specified.
+    """
+    if not month:
+        month = datetime.now().strftime("%Y-%m")
     
-    Query Parameters:
-    - workflow_id: Filter results by specific workflow
-    - campaign_id: Filter results by specific campaign
-    - days: Number of days to look back (default: 30)
-    """
-    service = AnalyticsService(db)
-    return await service.get_dashboard_stats(
-        owner_id=user_id,
-        workflow_id=workflow_id,
-        campaign_id=campaign_id,
-        days=days
-    )
+    return await AnalyticsService.get_target_progress(month, user_id)
 
-
-@router.get("/workflows/compare")
-async def compare_workflows(
-    workflow_ids: List[UUID] = Query(..., description="List of workflow IDs to compare"),
-    days: int = Query(30, description="Number of days to look back"),
-    db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(get_current_user_id)
+@router.post("/targets", response_model=CRMTargetResponse)
+async def create_target(
+    target: CRMTargetCreate,
+    current_user_id: UUID = Depends(get_current_user_id)
 ):
     """
-    Compare multiple workflows side-by-side.
+    Set/Update a target for a month. Admin only in production (role check should be added).
+    """
+    # Check if target already exists for this month/user
+    existing = await CRMTarget.find_one(CRMTarget.month == target.month, CRMTarget.user_id == target.user_id)
     
-    Query Parameters:
-    - workflow_ids: Comma-separated list of workflow UUIDs
-    - days: Number of days to look back (default: 30)
+    if existing:
+        existing.revenue_target = target.revenue_target
+        existing.calls_target = target.calls_target
+        existing.proposals_target = target.proposals_target
+        existing.meetings_target = target.meetings_target
+        await existing.save()
+        return existing
     
-    Example: /analytics/workflows/compare?workflow_ids=uuid1&workflow_ids=uuid2
-    """
-    service = AnalyticsService(db)
-    return await service.compare_workflows(
-        owner_id=user_id,
-        workflow_ids=workflow_ids,
-        days=days
-    )
+    new_target = CRMTarget(**target.model_dump())
+    await new_target.insert()
+    return new_target
 
-
-@router.get("/workflows/{workflow_id}/performance")
-async def get_workflow_performance(
-    workflow_id: UUID,
-    days: int = Query(30, description="Number of days to look back"),
-    db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(get_current_user_id)
+@router.get("/targets/all", response_model=List[CRMTargetResponse])
+async def list_targets(
+    current_user_id: UUID = Depends(get_current_user_id)
 ):
     """
-    Get detailed performance metrics for a specific workflow.
-    
-    Includes:
-    - Total instances
-    - Completion rate
-    - Email statistics
-    - Time-series chart data
+    List all targets.
     """
-    service = AnalyticsService(db)
-    return await service.get_workflow_performance(
-        owner_id=user_id,
-        workflow_id=workflow_id,
-        days=days
-    )
-
-
-@router.get("/campaigns/{campaign_id}/analytics")
-async def get_campaign_analytics(
-    campaign_id: UUID,
-    days: int = Query(30, description="Number of days to look back"),
-    db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(get_current_user_id)
-):
-    """
-    Get analytics for a specific campaign.
-    """
-    service = AnalyticsService(db)
-    return await service.get_dashboard_stats(
-        owner_id=user_id,
-        campaign_id=campaign_id,
-        days=days
-    )
-
-
-@router.get("/reputation")
-async def get_sender_reputation(
-    days: int = Query(30, description="Number of days to look back"),
-    db: AsyncSession = Depends(get_db),
-    user_id: UUID = Depends(get_current_user_id)
-):
-    """
-    Get the sender's reputation score and diagnostic warnings.
-    """
-    service = AnalyticsService(db)
-    return await service.get_sender_reputation(
-        owner_id=user_id,
-        days=days
-    )
+    return await CRMTarget.find_all().to_list()

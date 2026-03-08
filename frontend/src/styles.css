@@ -84,6 +84,12 @@ body {
   }
 }
 
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
 .node-active {
   border-color: #6366f1 !important;
   animation: node-pulse 2s infinite !important;

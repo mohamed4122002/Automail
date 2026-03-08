@@ -1,9 +1,5 @@
-from typing import AsyncGenerator
 from uuid import UUID
 from fastapi import Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from ..db import get_db
 from ..models import User
 
 from jose import JWTError, jwt
@@ -14,7 +10,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 async def get_current_user_id(
-    db: AsyncSession = Depends(get_db), 
     token: str = Depends(oauth2_scheme)
 ) -> UUID:
     """
@@ -42,9 +37,7 @@ async def get_current_user_id(
         raise credentials_exception
         
     # Verify user exists and is active
-    query = select(User).where(User.id == user_id, User.is_active == True)
-    result = await db.execute(query)
-    user = result.scalar_one_or_none()
+    user = await User.find_one(User.id == user_id, User.is_active == True)
     
     if not user:
         logger.warning(f"User {user_id} not found or inactive")

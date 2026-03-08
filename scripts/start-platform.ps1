@@ -180,7 +180,7 @@ Pop-Location
 Write-Info "Starting/validating Docker services (db, redis, backend, worker)..."
 
 try {
-    docker compose up -d db redis backend worker
+    docker compose up -d --build db redis backend worker
     Write-Success "docker compose services started (db, redis, backend, worker)."
 } catch {
     Fail-And-Exit "Failed to start docker-compose services: $_"
@@ -278,23 +278,6 @@ if (-not (Test-Path -LiteralPath $seedFlag)) {
 
 Write-Info "Starting application services (backend, worker, frontend)..."
 
-# Backend (FastAPI via uvicorn)
-try {
-    $backendArgs = "uvicorn backend.main:app --host 0.0.0.0 --port 8000"
-    Start-Process -FilePath "powershell" -ArgumentList "-NoExit", "-Command", $backendArgs -WindowStyle Minimized | Out-Null
-    Write-Success "Backend process started in a new PowerShell window."
-} catch {
-    Fail-And-Exit "Failed to start backend service: $_"
-}
-
-# Celery worker
-try {
-    $workerArgs = "celery -A backend.celery_app.celery_app worker -l info"
-    Start-Process -FilePath "powershell" -ArgumentList "-NoExit", "-Command", $workerArgs -WindowStyle Minimized | Out-Null
-    Write-Success "Celery worker started in a new PowerShell window."
-} catch {
-    Fail-And-Exit "Failed to start Celery worker: $_"
-}
 
 # Frontend (npm run dev)
 try {
@@ -368,25 +351,6 @@ if ($allOk) {
 
 Write-Info "Starting application services with live logs..."
 
-# Backend (FastAPI via uvicorn) - logs visible
-try {
-    $backendArgs = "uvicorn backend.main:app --host 0.0.0.0 --port 8000"
-    Write-Info "Starting Backend (FastAPI) with logs..."
-    Start-Process -FilePath "powershell" -ArgumentList "-NoExit", "-Command", $backendArgs
-    Write-Success "Backend process started."
-} catch {
-    Fail-And-Exit "Failed to start backend service: $_"
-}
-
-# Celery worker - logs visible
-try {
-    $workerArgs = "celery -A backend.celery_app.celery_app worker -l info"
-    Write-Info "Starting Celery worker with logs..."
-    Start-Process -FilePath "powershell" -ArgumentList "-NoExit", "-Command", $workerArgs
-    Write-Success "Celery worker started."
-} catch {
-    Fail-And-Exit "Failed to start Celery worker: $_"
-}
 
 # Frontend (Vite) - open in Google Chrome
 try {

@@ -1,25 +1,6 @@
 name: "marketing-automation"
 
 services:
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: automation_user
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-Mm01151800275} # Default only for first run if not set
-      POSTGRES_DB: marketing_automation
-    env_file:
-      - .env
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U automation_user -d marketing_automation" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
   redis:
     image: redis:7
     ports:
@@ -39,15 +20,12 @@ services:
       dockerfile: Dockerfile.backend
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      # Use internal service names (db, redis) inside Docker
-      DATABASE_URL: "postgresql://automation_user:${POSTGRES_PASSWORD}@db:5432/marketing_automation"
+      MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
       REDIS_URL: "redis://redis:6379/0"
-      RUN_MIGRATIONS: "1"
+      RUN_MIGRATIONS: "0"
       RUN_SEED: "1"
     env_file:
       - .env
@@ -55,6 +33,9 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+    networks:
+      - default
+      - shared_mongo_net
     restart: unless-stopped
 
   worker:
@@ -63,14 +44,12 @@ services:
       dockerfile: Dockerfile.backend
     command: celery -A backend.celery_app worker --loglevel=info --pool=prefork --concurrency=10
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
       backend:
         condition: service_started
     environment:
-      DATABASE_URL: "postgresql://automation_user:${POSTGRES_PASSWORD}@db:5432/marketing_automation"
+      MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
       REDIS_URL: "redis://redis:6379/0"
       RUN_MIGRATIONS: "0"
       RUN_SEED: "0"
@@ -78,6 +57,9 @@ services:
       - .env
     volumes:
       - .:/app
+    networks:
+      - default
+      - shared_mongo_net
     restart: unless-stopped
 
   beat:
@@ -86,14 +68,12 @@ services:
       dockerfile: Dockerfile.backend
     command: celery -A backend.celery_app beat --loglevel=info
     depends_on:
-      db:
-        condition: service_healthy
       redis:
         condition: service_healthy
       backend:
         condition: service_started
     environment:
-      DATABASE_URL: "postgresql://automation_user:${POSTGRES_PASSWORD}@db:5432/marketing_automation"
+      MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
       REDIS_URL: "redis://redis:6379/0"
       RUN_MIGRATIONS: "0"
       RUN_SEED: "0"
@@ -101,6 +81,9 @@ services:
       - .env
     volumes:
       - .:/app
+    networks:
+      - default
+      - shared_mongo_net
     restart: unless-stopped
 
   frontend:
@@ -118,6 +101,11 @@ services:
       - backend
     restart: unless-stopped
 
+networks:
+  default:
+    driver: bridge
+  shared_mongo_net:
+    external: true
+
 volumes:
-  pgdata:
   redis_data:

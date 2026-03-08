@@ -4,10 +4,10 @@ import Layout from '../components/layout/Layout';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import api from '../lib/api';
-import { Mail, Globe, Workflow, Save, Eye, EyeOff } from 'lucide-react';
+import { Mail, Globe, Workflow, Save, Eye, EyeOff, Target, Link, Check, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
 
-type TabType = 'email' | 'email_limits' | 'system' | 'workflow';
+type TabType = 'email' | 'email_limits' | 'system' | 'workflow' | 'crm' | 'integrations';
 
 // Provider-specific form fields component
 const ProviderFields: React.FC<{
@@ -215,6 +215,30 @@ const Settings: React.FC = () => {
         }
     });
 
+    const { data: crmPrefs } = useQuery({
+        queryKey: ['settings', 'crm_preferences'],
+        queryFn: async () => {
+            try {
+                const res = await api.get('/settings/crm_preferences');
+                return res.data.value;
+            } catch {
+                return { inactivity_threshold_days: 3, enable_inactivity_alerts: true };
+            }
+        }
+    });
+
+    const { data: integrationStatus, refetch: refetchIntegrations } = useQuery({
+        queryKey: ['settings', 'integrations_status'],
+        queryFn: async () => {
+            try {
+                const res = await api.get('/integrations/status');
+                return res.data;
+            } catch {
+                return { google_calendar: { connected: false } };
+            }
+        }
+    });
+
     // Mutations
     const [testStatus, setTestStatus] = useState<string>('');
 
@@ -252,6 +276,14 @@ const Settings: React.FC = () => {
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['settings', 'workflow_preferences'] });
             toast.success('Workflow preferences saved!');
+        }
+    });
+
+    const crmMutation = useMutation({
+        mutationFn: (data: any) => api.post('/settings/crm-preferences', data),
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['settings', 'crm_preferences'] });
+            toast.success('CRM preferences saved!');
         }
     });
 
@@ -308,14 +340,65 @@ const Settings: React.FC = () => {
         workflowMutation.mutate(data);
     };
 
+    const handleCrmSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+        e.preventDefault();
+        const formData = new FormData(e.currentTarget);
+        const data = {
+            inactivity_threshold_days: parseInt(formData.get('inactivity_threshold_days') as string),
+            enable_inactivity_alerts: formData.get('enable_inactivity_alerts') === 'on',
+        };
+        crmMutation.mutate(data);
+    };
+
+    const handleGoogleAuth = async () => {
+        try {
+            const redirectUri = `${window.location.host}/settings?tab=integrations`;
+            const res = await api.get(`/integrations/google/auth?redirect_uri=${encodeURIComponent(redirectUri)}`);
+            window.location.href = res.data.auth_url;
+        } catch (error: any) {
+            toast.error('Failed to start Google authentication');
+        }
+    };
+
+    const handleDisconnectGoogle = async () => {
+        try {
+            await api.delete('/integrations/google');
+            refetchIntegrations();
+            toast.success('Google Calendar disconnected');
+        } catch (error: any) {
+            toast.error('Failed to disconnect');
+        }
+    };
+
+    // Check for callback code in URL
+    React.useEffect(() => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const code = urlParams.get('code');
+        if (code && activeTab === 'integrations') {
+            const redirectUri = `${window.location.host}/settings?tab=integrations`;
+            api.get(`/integrations/google/callback?code=${code}&redirect_uri=${encodeURIComponent(redirectUri)}`)
+                .then(() => {
+                    toast.success('Google Calendar connected!');
+                    refetchIntegrations();
+                    // Clean URL
+                    window.history.replaceState({}, '', window.location.pathname + '?tab=integrations');
+                })
+                .catch(() => {
+                    toast.error('Failed to complete Google connection');
+                });
+        }
+    }, [activeTab]);
+
     const tabs = [
         { id: 'email' as TabType, label: 'Email Provider', icon: Mail },
         { id: 'system' as TabType, label: 'System', icon: Globe },
         { id: 'workflow' as TabType, label: 'Workflows', icon: Workflow },
+        { id: 'crm' as TabType, label: 'CRM', icon: Target },
+        { id: 'integrations' as TabType, label: 'Integrations', icon: Link },
     ];
 
     return (
-        <Layout title="Settings">
+        <Layout title="Settings" >
             <div className="flex flex-col gap-6">
                 {/* Tabs */}
                 <div className="flex gap-2 border-b border-slate-800">
@@ -603,8 +686,131 @@ const Settings: React.FC = () => {
                         </form>
                     </Card>
                 )}
+                {/* CRM Preferences Tab */}
+                {activeTab === 'crm' && (
+                    <Card>
+                        <form onSubmit={handleCrmSubmit} className="p-6 space-y-6">
+                            <div>
+                                <h3 className="text-lg font-semibold text-slate-200 mb-4">CRM & Pipeline Automation</h3>
+                                <p className="text-sm text-slate-400 mb-6">Configure inactivity alerts and automated pipeline management</p>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-300 mb-2">Inactivity Threshold (days)</label>
+                                    <input
+                                        type="number"
+                                        name="inactivity_threshold_days"
+                                        defaultValue={crmPrefs?.inactivity_threshold_days || 3}
+                                        min="1"
+                                        max="30"
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-slate-200"
+                                    />
+                                    <p className="text-xs text-slate-500 mt-1">Number of days without activity before alerting the lead owner</p>
+                                </div>
+
+                                <div className="md:col-span-2">
+                                    <label className="flex items-center gap-2">
+                                        <input
+                                            type="checkbox"
+                                            name="enable_inactivity_alerts"
+                                            defaultChecked={crmPrefs?.enable_inactivity_alerts !== false}
+                                            className="w-4 h-4 bg-slate-900 border-slate-700 rounded"
+                                        />
+                                        <span className="text-sm text-slate-300">Enable in-app alerts for inactive leads</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div className="pt-4 border-t border-slate-800">
+                                <Button type="submit" leftIcon={<Save className="w-4 h-4" />}>
+                                    Save CRM Preferences
+                                </Button>
+                            </div>
+                        </form>
+                    </Card>
+                )}
+
+                {activeTab === 'integrations' && (
+                    <Card className="p-6 bg-slate-800/50 border-slate-700">
+                        <div className="flex items-center gap-3 mb-6">
+                            <div className="p-2 bg-indigo-500/10 rounded-lg">
+                                <Link className="w-5 h-5 text-indigo-400" />
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-semibold text-slate-100">External Integrations</h3>
+                                <p className="text-sm text-slate-400">Connect external tools to your CRM workflow</p>
+                            </div>
+                        </div>
+
+                        <div className="space-y-6">
+                            {/* Google Calendar */}
+                            <div className="flex flex-col md:flex-row md:items-center justify-between p-4 bg-slate-900/50 rounded-lg border border-slate-800 gap-4">
+                                <div className="flex items-center gap-4">
+                                    <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center">
+                                        <Globe className="w-6 h-6 text-blue-600" />
+                                    </div>
+                                    <div>
+                                        <h4 className="font-medium text-slate-100">Google Calendar</h4>
+                                        <p className="text-xs text-slate-500">Sync meetings and book calls directly from leads</p>
+                                    </div>
+                                </div>
+                                <div>
+                                    {integrationStatus?.google_calendar?.connected ? (
+                                        <div className="flex items-center gap-3">
+                                            <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded-full border border-emerald-400/20">
+                                                <Check className="w-3 h-3" /> Connected
+                                            </span>
+                                            <Button variant="outline" size="sm" onClick={handleDisconnectGoogle}>
+                                                Disconnect
+                                            </Button>
+                                        </div>
+                                    ) : (
+                                        <Button variant="primary" size="sm" onClick={handleGoogleAuth}>
+                                            Connect Calendar
+                                        </Button>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Inbound Forms */}
+                            <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-800">
+                                <div className="flex items-center gap-4 mb-4">
+                                    <div className="w-10 h-10 bg-slate-800 rounded-lg flex items-center justify-center">
+                                        <ExternalLink className="w-6 h-6 text-indigo-400" />
+                                    </div>
+                                    <div>
+                                        <h4 className="font-medium text-slate-100">Inbound Webhooks (Forms)</h4>
+                                        <p className="text-xs text-slate-500">Capture leads from external websites and landing pages</p>
+                                    </div>
+                                </div>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-[10px] font-medium text-slate-500 uppercase mb-1">Webhook URL</label>
+                                        <div className="flex gap-2">
+                                            <input
+                                                readOnly
+                                                value={`${window.location.origin}/api/inbound/form`}
+                                                className="flex-1 bg-slate-950 border border-slate-800 rounded-md px-3 py-1.5 text-xs text-slate-400 font-mono"
+                                            />
+                                            <Button size="sm" variant="outline" onClick={() => {
+                                                navigator.clipboard.writeText(`${window.location.origin}/api/inbound/form`);
+                                                toast.success('URL copied to clipboard');
+                                            }}>Copy</Button>
+                                        </div>
+                                    </div>
+                                    <div className="p-3 bg-amber-500/5 border border-amber-500/10 rounded-md">
+                                        <p className="text-[10px] text-amber-500/80 leading-relaxed">
+                                            Send a JSON POST request with fields: <code>email</code>, <code>first_name</code>, <code>last_name</code>, <code>company</code>, <code>message</code>.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </Card>
+                )}
             </div>
-        </Layout>
+        </Layout >
     );
 };
 

@@ -1,9 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 from typing import List, Optional
-from ..db import get_db
 from ..models import Campaign, Workflow
 from ..schemas.campaigns import CampaignOut, CampaignCreate, CampaignList, CampaignDetail
 from ..schemas.campaign_analytics import (
@@ -19,25 +16,22 @@ from ..schemas.campaign_analytics import (
 from ..services.campaigns import CampaignService
 from ..services.campaign_manager import CampaignManagerService
 from ..services.campaign_analytics import CampaignAnalyticsService
-from sqlalchemy.orm import selectinload
 from .deps import get_current_user_id
+import logging
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
 @router.get("", response_model=List[CampaignList])
 async def list_campaigns(
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
-) -> list[Campaign]:
-    # Use Service for listing
-    service = CampaignService(db)
+) -> List[CampaignList]:
+    service = CampaignService()
     return await service.list_campaigns(user_id)
 
 
 @router.post("", response_model=CampaignOut, status_code=201)
 async def create_campaign(
     payload: CampaignCreate,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ) -> Campaign:
     campaign = Campaign(
@@ -46,13 +40,7 @@ async def create_campaign(
         owner_id=user_id,
         contact_list_id=payload.contact_list_id
     )
-    db.add(campaign)
-    await db.commit()
-    
-    # Eager load relationships for the response
-    stmt = sa.select(Campaign).where(Campaign.id == campaign.id).options(selectinload(Campaign.workflow))
-    result = await db.execute(stmt)
-    campaign = result.scalar_one()
+    await campaign.insert()
     
     return campaign
 
@@ -60,10 +48,9 @@ async def create_campaign(
 @router.get("/{campaign_id}", response_model=CampaignDetail)
 async def get_campaign(
     campaign_id: UUID,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
-    service = CampaignService(db)
+    service = CampaignService()
     try:
         return await service.get_campaign_detail(campaign_id, owner_id=user_id)
     except ValueError as e:
@@ -74,16 +61,12 @@ async def get_campaign(
 async def update_campaign(
     campaign_id: UUID,
     payload: dict, # Using dict for partial updates
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ) -> Campaign:
-    result = await db.execute(
-        sa.select(Campaign).where(
-            Campaign.id == campaign_id,
-            Campaign.owner_id == user_id
-        )
+    campaign = await Campaign.find_one(
+        Campaign.id == campaign_id,
+        Campaign.owner_id == user_id
     )
-    campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
@@ -94,7 +77,7 @@ async def update_campaign(
                 value = UUID(value)
             setattr(campaign, key, value)
             
-    await db.commit()
+    await campaign.save()
     
     # Broadcast configuration update
     from .realtime import broadcast_event
@@ -114,26 +97,19 @@ async def update_campaign(
         "timestamp": datetime.utcnow().isoformat()
     })
 
-    
-    # Eager load relationships for the response
-    stmt = sa.select(Campaign).where(Campaign.id == campaign_id).options(selectinload(Campaign.workflow))
-    result = await db.execute(stmt)
-    campaign = result.scalar_one()
-    
     return campaign
 
 
 @router.post("/{campaign_id}/activate")
 async def activate_campaign(
     campaign_id: UUID,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """
     Activate a campaign and start workflow instances for all contacts.
     Returns detailed status including worker availability.
     """
-    manager = CampaignManagerService(db)
+    manager = CampaignManagerService()
     try:
         result = await manager.activate_campaign(campaign_id, user_id)
         
@@ -156,7 +132,6 @@ async def activate_campaign(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        import logging
         logging.error(f"Campaign activation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Campaign activation failed: {str(e)}")
 
@@ -164,10 +139,9 @@ async def activate_campaign(
 @router.post("/{campaign_id}/pause")
 async def pause_campaign(
     campaign_id: UUID,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
-    manager = CampaignManagerService(db)
+    manager = CampaignManagerService()
     try:
         return await manager.pause_campaign(campaign_id)
     except ValueError as e:
@@ -178,10 +152,9 @@ async def pause_campaign(
 async def update_campaign_workflow(
     campaign_id: UUID,
     workflow_id: UUID = Query(..., alias="workflow_id"),
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
-    manager = CampaignManagerService(db)
+    manager = CampaignManagerService()
     try:
         return await manager.update_workflow(campaign_id, workflow_id)
     except ValueError as e:
@@ -191,30 +164,26 @@ async def update_campaign_workflow(
 @router.get("/{campaign_id}/warmup-status")
 async def get_campaign_warmup_status(
     campaign_id: UUID,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
-    result = await db.execute(
-        sa.select(Campaign).where(
-            Campaign.id == campaign_id,
-            Campaign.owner_id == user_id
-        )
+    campaign = await Campaign.find_one(
+        Campaign.id == campaign_id,
+        Campaign.owner_id == user_id
     )
-    campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     
     # Calculate real status
     # This matches the frontend expectations in CampaignDetail.tsx
     from ..models import EmailSend
-    q_sent = await db.execute(
-        sa.select(sa.func.count(EmailSend.id))
-        .where(
-            EmailSend.campaign_id == campaign_id,
-            sa.func.date(EmailSend.created_at) == sa.func.current_date()
-        )
-    )
-    sent_today = q_sent.scalar_one() or 0
+    from datetime import datetime, timezone
+    
+    start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    sent_today = await EmailSend.find(
+        EmailSend.campaign_id == campaign_id,
+        EmailSend.created_at >= start_of_day
+    ).count()
     
     cfg = campaign.warmup_config or {}
     current_limit = cfg.get("current_limit", 10)
@@ -236,11 +205,10 @@ async def get_campaign_warmup_status(
 async def get_campaign_analytics(
     campaign_id: UUID,
     days: int = 30,  # Number of days for time series data
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Get comprehensive analytics data for a campaign."""
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
         return await analytics_service.get_analytics(campaign_id, days=days)
     except ValueError as e:
@@ -256,11 +224,10 @@ async def get_campaign_recipients(
     search: Optional[str] = None,  # Search by email
     sort_by: Optional[str] = Query("created_at", description="Field to sort by (created_at, email, name)"),
     order: Optional[str] = Query("desc", description="Sort order (asc, desc)"),
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Get paginated list of campaign recipients with their status."""
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
         return await analytics_service.get_recipients(
             campaign_id=campaign_id,
@@ -275,17 +242,16 @@ async def get_campaign_recipients(
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.get("/{campaign_id}/recipients/{user_id}", response_model=RecipientDetail)
+@router.get("/{campaign_id}/recipients/{recipient_id}", response_model=RecipientDetail)
 async def get_recipient_detail(
     campaign_id: UUID,
-    user_id: UUID,
-    db: AsyncSession = Depends(get_db),
+    recipient_id: UUID,
     current_user_id: UUID = Depends(get_current_user_id)
 ):
     """Get detailed information about a specific recipient."""
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
-        return await analytics_service.get_recipient_detail(campaign_id, user_id)
+        return await analytics_service.get_recipient_detail(campaign_id, recipient_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -293,11 +259,10 @@ async def get_recipient_detail(
 @router.get("/{campaign_id}/workflow", response_model=WorkflowVisualization)
 async def get_campaign_workflow(
     campaign_id: UUID,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Get workflow visualization data with execution statistics."""
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
         return await analytics_service.get_workflow_visualization(campaign_id)
     except ValueError as e:
@@ -308,11 +273,10 @@ async def get_campaign_workflow(
 async def bulk_recipients_action(
     campaign_id: UUID,
     payload: BulkActionRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Perform bulk actions on recipients (tag, untag, remove)."""
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
         return await analytics_service.bulk_recipients_action(
             campaign_id=campaign_id,
@@ -328,14 +292,13 @@ async def bulk_recipients_action(
 async def export_recipients_csv(
     campaign_id: UUID,
     payload: ExportRecipientsRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Export selected recipients to CSV."""
     from fastapi.responses import StreamingResponse
     import io
     
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
         csv_content = await analytics_service.export_recipients(
             campaign_id=campaign_id,
@@ -364,11 +327,10 @@ async def export_recipients_csv(
 async def send_test_email(
     campaign_id: UUID,
     payload: TestEmailRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Send test email to specified recipients."""
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
         return await analytics_service.send_test_email(
             campaign_id=campaign_id,
@@ -384,11 +346,10 @@ async def send_test_email(
 async def duplicate_campaign(
     campaign_id: UUID,
     payload: DuplicateCampaignRequest,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Duplicate an existing campaign."""
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
         return await analytics_service.duplicate_campaign(
             campaign_id=campaign_id,
@@ -408,14 +369,14 @@ async def export_campaign_data(
     include_recipients: bool = True,
     include_analytics: bool = True,
     include_events: bool = False,
-    db: AsyncSession = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id)
 ):
     """Export campaign data in various formats."""
     from fastapi.responses import StreamingResponse
+    from datetime import datetime
     import io
     
-    analytics_service = CampaignAnalyticsService(db)
+    analytics_service = CampaignAnalyticsService()
     try:
         data = await analytics_service.export_campaign_data(
             campaign_id=campaign_id,
@@ -445,3 +406,4 @@ async def export_campaign_data(
             
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+

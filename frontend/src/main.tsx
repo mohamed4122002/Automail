@@ -6,7 +6,14 @@ import App from "./App";
 import "./styles.css";
 import { Toaster } from "./components/ui/Toaster";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30 * 1000, // 30 seconds
+      gcTime: 10 * 60 * 1000, // 10 minutes
+    },
+  },
+});
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

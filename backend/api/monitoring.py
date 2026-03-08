@@ -1,17 +1,15 @@
+from beanie.operators import In
 """
-Enhanced Monitoring API — Phase 1 DB Hardening
+Enhanced Monitoring API — DB Hardening
 Provides health checks, connection pool stats, security status, and index health.
 """
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func, desc, text
-from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, List
 from uuid import UUID
 from datetime import datetime, timedelta
 
-from ..db import get_db, get_pool_status, check_db_connection
 from ..models import Campaign, User, EmailSend, Event, WorkflowInstance, WorkflowStep
-from ..auth import get_current_user
+from ..auth import get_current_user, get_current_user_roles
 from ..config import settings
 
 from redis import Redis
@@ -26,11 +24,9 @@ router = APIRouter(prefix="/v1/monitor", tags=["monitoring"])
 # ── Health Check (public) ─────────────────────────────────────────────────────
 
 @router.get("/health", summary="Service health check")
-async def health_check(
-    db: AsyncSession = Depends(get_db)
-) -> Dict[str, Any]:
+async def health_check() -> Dict[str, Any]:
     """
-    Check health of all services: PostgreSQL, Redis, Celery.
+    Check health of all services: MongoDB, Redis, Celery.
     Returns 200 even if degraded (so frontend can show partial outage UI).
     Returns 503 only if ALL services are down.
     """
@@ -38,23 +34,21 @@ async def health_check(
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "services": {},
-        "pool": {},
     }
 
-    # 1. PostgreSQL
+    # 1. MongoDB
     try:
-        await db.execute(text("SELECT 1"))
-        health["services"]["postgres"] = "healthy"
+        from ..db import check_db_connection
+        is_healthy = await check_db_connection()
+        if is_healthy:
+            health["services"]["mongodb"] = "healthy"
+        else:
+            health["services"]["mongodb"] = "unhealthy"
+            health["status"] = "degraded"
     except Exception as e:
-        logger.error(f"PostgreSQL health check failed: {e}")
-        health["services"]["postgres"] = "unhealthy"
+        logger.error(f"MongoDB health check failed: {e}")
+        health["services"]["mongodb"] = "unhealthy"
         health["status"] = "degraded"
-
-    # 2. Connection Pool Stats
-    try:
-        health["pool"] = await get_pool_status()
-    except Exception as e:
-        health["pool"] = {"error": str(e)}
 
     # 3. Redis
     try:
@@ -97,56 +91,17 @@ async def health_check(
     return health
 
 
-# ── DB Pool Stats (admin) ─────────────────────────────────────────────────────
-
-@router.get("/db-pool", summary="Connection pool statistics")
-async def get_db_pool_stats(
-    current_admin: User = Depends(get_current_user)
-) -> Dict[str, Any]:
-    """
-    Return real-time connection pool statistics.
-    Useful for diagnosing connection exhaustion under load.
-    """
-    if current_admin.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    pool_stats = await get_pool_status()
-
-    # Compute utilization percentage
-    pool_size = pool_stats.get("pool_size", 0)
-    checked_out = pool_stats.get("checked_out", 0)
-    utilization = round((checked_out / pool_size * 100) if pool_size > 0 else 0, 1)
-
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "pool": pool_stats,
-        "utilization_pct": utilization,
-        "config": {
-            "pool_size": settings.DB_POOL_SIZE,
-            "max_overflow": settings.DB_MAX_OVERFLOW,
-            "pool_recycle_seconds": settings.DB_POOL_RECYCLE,
-            "statement_timeout_ms": settings.DB_STATEMENT_TIMEOUT_MS,
-            "lock_timeout_ms": settings.DB_LOCK_TIMEOUT_MS,
-        },
-        "warnings": (
-            ["Pool utilization above 80% — consider increasing DB_POOL_SIZE"]
-            if utilization > 80 else []
-        ),
-    }
-
-
 # ── Security Status (admin) ───────────────────────────────────────────────────
 
 @router.get("/security-status", summary="Security configuration status")
 async def get_security_status(
-    db: AsyncSession = Depends(get_db),
     current_admin: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Audit security configuration: encryption, CORS, JWT, and sensitive settings.
     Flags any misconfiguration that could be a security risk.
     """
-    if current_admin.role != "admin":
+    if "admin" not in current_admin.roles:
         raise HTTPException(status_code=403, detail="Admin access required")
 
     issues: List[str] = []
@@ -182,10 +137,7 @@ async def get_security_status(
         from ..models import Setting
         sensitive_keys = ["email_provider", "smtp_config", "api_keys"]
         for key in sensitive_keys:
-            result = await db.execute(
-                select(Setting).where(Setting.key == key)
-            )
-            setting = result.scalar_one_or_none()
+            setting = await Setting.find_one(Setting.key == key)
             if setting:
                 if not setting.is_encrypted:
                     issues.append(f"Setting '{key}' exists but is NOT marked as encrypted!")
@@ -201,7 +153,7 @@ async def get_security_status(
         checks["settings_check"] = f"error: {e}"
 
     # 6. Check DB URL doesn't contain password in logs
-    db_url_safe = settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "hidden"
+    db_url_safe = settings.MONGODB_URL.split("@")[-1] if "@" in settings.MONGODB_URL else "hidden"
     checks["db_host"] = db_url_safe
 
     return {
@@ -213,126 +165,26 @@ async def get_security_status(
     }
 
 
-# ── Index Health (admin) ──────────────────────────────────────────────────────
-
-@router.get("/index-health", summary="Database index usage statistics")
-async def get_index_health(
-    db: AsyncSession = Depends(get_db),
-    current_admin: User = Depends(get_current_user)
-) -> Dict[str, Any]:
-    """
-    Check if the performance indexes from migration 0010 exist and are being used.
-    Also shows table sizes and sequential scan counts.
-    """
-    if current_admin.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    # Check our specific indexes exist
-    our_indexes = [
-        "ix_events_campaign_type_created",
-        "ix_events_email_send_type",
-        "ix_events_created_at",
-        "ix_events_user_type_created",
-        "ix_email_sends_status_created",
-        "ix_email_sends_campaign_status",
-        "ix_workflow_instances_status_updated",
-        "ix_workflow_instances_workflow_status",
-        "ix_workflow_steps_instance_status",
-        "ix_workflow_steps_node_status",
-        "ix_contacts_list_email",
-        "ix_leads_status_score",
-        "ix_leads_assigned_to",
-    ]
-
-    index_status = {}
-    try:
-        for idx_name in our_indexes:
-            result = await db.execute(text(
-                "SELECT indexname FROM pg_indexes WHERE indexname = :name"
-            ), {"name": idx_name})
-            exists = result.scalar_one_or_none() is not None
-            index_status[idx_name] = "EXISTS" if exists else "MISSING — run: alembic upgrade head"
-    except Exception as e:
-        index_status["error"] = str(e)
-
-    # Table sizes
-    table_sizes = {}
-    try:
-        result = await db.execute(text("""
-            SELECT
-                relname AS table_name,
-                pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
-                pg_size_pretty(pg_relation_size(relid)) AS table_size,
-                n_live_tup AS row_estimate
-            FROM pg_catalog.pg_statio_user_tables
-            WHERE relname IN ('events', 'email_sends', 'workflow_instances', 'workflow_steps', 'contacts', 'leads')
-            ORDER BY pg_total_relation_size(relid) DESC
-        """))
-        for row in result:
-            table_sizes[row.table_name] = {
-                "total_size": row.total_size,
-                "table_size": row.table_size,
-                "row_estimate": row.row_estimate,
-            }
-    except Exception as e:
-        table_sizes["error"] = str(e)
-
-    # Sequential scan warnings (tables with high seq scans = missing indexes)
-    seq_scan_warnings = []
-    try:
-        result = await db.execute(text("""
-            SELECT relname, seq_scan, idx_scan
-            FROM pg_stat_user_tables
-            WHERE relname IN ('events', 'email_sends', 'workflow_instances')
-              AND seq_scan > 100
-            ORDER BY seq_scan DESC
-        """))
-        for row in result:
-            if row.seq_scan > (row.idx_scan or 0):
-                seq_scan_warnings.append(
-                    f"Table '{row.relname}': {row.seq_scan} seq scans vs {row.idx_scan} index scans — check indexes"
-                )
-    except Exception as e:
-        seq_scan_warnings.append(f"Could not check seq scans: {e}")
-
-    missing_count = sum(1 for v in index_status.values() if "MISSING" in str(v))
-
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "indexes": index_status,
-        "missing_indexes": missing_count,
-        "table_sizes": table_sizes,
-        "seq_scan_warnings": seq_scan_warnings,
-        "action_needed": "Run `alembic upgrade head` to create missing indexes" if missing_count > 0 else None,
-    }
-
-
 # ── System Stats (admin) ──────────────────────────────────────────────────────
 
 @router.get("/system", summary="System-wide metrics")
 async def get_system_stats(
-    db: AsyncSession = Depends(get_db),
-    current_admin: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get system-wide metrics and health status."""
-    if current_admin.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+    roles = await get_current_user_roles(current_user)
+    if not any(r in roles for r in ["admin", "sales_lead"]):
+        raise HTTPException(status_code=403, detail="Admin or Sales Lead access required")
 
-    campaign_count = (await db.execute(select(func.count(Campaign.id)))).scalar()
-    user_count = (await db.execute(select(func.count(User.id)))).scalar()
-    sent_count = (await db.execute(select(func.count(EmailSend.id)).where(EmailSend.status == "sent"))).scalar()
-    queued_count = (await db.execute(select(func.count(EmailSend.id)).where(EmailSend.status == "queued"))).scalar()
+    campaign_count = await Campaign.find_all().count()
+    user_count = await User.find_all().count()
+    sent_count = await EmailSend.find(EmailSend.status == "sent").count()
+    queued_count = await EmailSend.find(EmailSend.status == "queued").count()
 
-    active_workflows = (await db.execute(
-        select(func.count(WorkflowInstance.id)).where(WorkflowInstance.status == "running")
-    )).scalar()
+    active_workflows = await WorkflowInstance.find(WorkflowInstance.status == "running").count()
 
     yesterday = datetime.utcnow() - timedelta(days=1)
-    recent_events_count = (await db.execute(
-        select(func.count(Event.id)).where(Event.created_at >= yesterday)
-    )).scalar()
-
-    pool_stats = await get_pool_status()
+    recent_events_count = await Event.find(Event.created_at >= yesterday).count()
 
     return {
         "status": "healthy",
@@ -344,8 +196,7 @@ async def get_system_stats(
             "emails_queued": queued_count,
             "active_workflow_instances": active_workflows,
             "events_24h": recent_events_count,
-        },
-        "pool": pool_stats,
+        }
     }
 
 
@@ -353,25 +204,24 @@ async def get_system_stats(
 
 @router.get("/workflow/health", summary="Workflow instance health")
 async def get_workflow_health(
-    db: AsyncSession = Depends(get_db),
-    current_admin: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Get metrics on workflow instances and stalled detections."""
-    if current_admin.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    service = CampaignManagerService(db)
+    roles = await get_current_user_roles(current_user)
+    if not any(r in roles for r in ["admin", "sales_lead"]):
+        raise HTTPException(status_code=403, detail="Admin or Sales Lead access required")
+    service = CampaignManagerService()
     return await service.get_workflow_health()
 
 
 @router.post("/workflow/repair", summary="Repair stalled workflows")
 async def repair_stalled_workflows(
-    db: AsyncSession = Depends(get_db),
     current_admin: User = Depends(get_current_user)
 ):
     """Trigger a repair for all stalled workflow instances."""
-    if current_admin.role != "admin":
+    if "admin" not in current_admin.roles:
         raise HTTPException(status_code=403, detail="Admin access required")
-    service = CampaignManagerService(db)
+    service = CampaignManagerService()
     return await service.repair_stalled_instances()
 
 
@@ -380,47 +230,47 @@ async def repair_stalled_workflows(
 @router.get("/campaign/{campaign_id}", summary="Campaign monitoring detail")
 async def get_campaign_monitoring(
     campaign_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    current_admin: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get detailed monitoring for a specific campaign."""
-    if current_admin.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+    roles = await get_current_user_roles(current_user)
+    if not any(r in roles for r in ["admin", "sales_lead"]):
+        raise HTTPException(status_code=403, detail="Admin or Sales Lead access required")
 
-    campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
+    campaign = await Campaign.find_one(Campaign.id == campaign_id)
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
 
-    recent_events_res = await db.execute(
-        select(Event)
-        .where(Event.campaign_id == campaign_id)
-        .order_by(desc(Event.created_at))
-        .limit(20)
-    )
-    recent_events = recent_events_res.scalars().all()
+    recent_events = await Event.find(
+        Event.campaign_id == campaign_id
+    ).sort("-created_at").limit(20).to_list()
 
-    perf_res = await db.execute(
-        select(
-            WorkflowStep.node_id,
-            func.avg(
-                func.extract("epoch", WorkflowStep.finished_at) -
-                func.extract("epoch", WorkflowStep.started_at)
-            ).label("avg_duration"),
-            func.count(WorkflowStep.id).label("executions")
-        )
-        .join(WorkflowInstance, WorkflowStep.instance_id == WorkflowInstance.id)
-        .where(WorkflowInstance.workflow_id == campaign.workflow_id)
-        .where(WorkflowStep.status == "completed")
-        .where(WorkflowStep.finished_at != None)
-        .group_by(WorkflowStep.node_id)
-    )
-    performance = {
-        str(row.node_id): {
-            "avg_duration_seconds": round(float(row.avg_duration), 2) if row.avg_duration else 0,
-            "executions": row.executions,
-        }
-        for row in perf_res if row.node_id
-    }
+    # Manual aggregation in Python for performance (if small) or use Beanie
+    instances = await WorkflowInstance.find(WorkflowInstance.workflow_id == campaign.workflow_id).to_list()
+    instance_ids = [i.id for i in instances]
+    
+    performance = {}
+    if instance_ids:
+        steps = await WorkflowStep.find(
+            In(WorkflowStep.instance_id, instance_ids),
+            WorkflowStep.status == "completed"
+        ).to_list()
+        
+        node_stats = {}
+        for step in steps:
+            if step.finished_at and step.started_at:
+                duration = (step.finished_at - step.started_at).total_seconds()
+                nid = str(step.node_id)
+                if nid not in node_stats:
+                    node_stats[nid] = {"total_duration": 0, "executions": 0}
+                node_stats[nid]["total_duration"] += duration
+                node_stats[nid]["executions"] += 1
+                
+        for nid, stats in node_stats.items():
+            performance[nid] = {
+                "avg_duration_seconds": round(stats["total_duration"] / stats["executions"], 2),
+                "executions": stats["executions"]
+            }
 
     return {
         "campaign_id": str(campaign_id),
@@ -443,11 +293,12 @@ async def get_campaign_monitoring(
 
 @router.get("/infrastructure", summary="Redis and Celery worker metrics")
 async def get_infrastructure_stats(
-    current_admin: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get detailed Redis and Celery worker metrics."""
-    if current_admin.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+    roles = await get_current_user_roles(current_user)
+    if not any(r in roles for r in ["admin", "sales_lead"]):
+        raise HTTPException(status_code=403, detail="Admin or Sales Lead access required")
 
     infra_data: Dict[str, Any] = {
         "redis": {"status": "unknown"},
@@ -493,3 +344,113 @@ async def get_infrastructure_stats(
         infra_data["celery"]["error"] = str(e)
 
     return infra_data
+
+
+# DB Pool Stats (MongoDB equivalent)
+
+@router.get("/db-pool", summary="MongoDB connection stats")
+async def get_db_pool_stats(
+    current_admin: User = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Get MongoDB connection pool and server status stats."""
+    if "admin" not in current_admin.roles:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..db import client as motor_client
+    warnings_list = []
+    pool_info = {}
+    config = {}
+    utilization_pct = 0.0
+
+    try:
+        if motor_client is not None:
+            server_status = await motor_client.admin.command("serverStatus")
+            connections = server_status.get("connections", {})
+            current_conns = connections.get("current", 0)
+            available_conns = connections.get("available", 0)
+            total_conns = current_conns + available_conns
+            utilization_pct = round((current_conns / total_conns * 100), 1) if total_conns > 0 else 0.0
+
+            pool_info = {
+                "pool_size": total_conns,
+                "checked_in": available_conns,
+                "checked_out": current_conns,
+                "overflow": 0,
+                "invalid": 0
+            }
+            config = {
+                "pool_size": total_conns,
+                "max_overflow": 0,
+                "pool_recycle_seconds": 0,
+                "statement_timeout_ms": 0,
+                "lock_timeout_ms": 0
+            }
+
+            if utilization_pct > 80:
+                warnings_list.append(f"High connection pool usage: {utilization_pct}%")
+        else:
+            warnings_list.append("MongoDB client is not initialized")
+    except Exception as e:
+        logger.error(f"Failed to fetch DB pool stats: {e}")
+        warnings_list.append(f"Could not retrieve pool stats: {str(e)}")
+
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "pool": pool_info,
+        "utilization_pct": utilization_pct,
+        "config": config,
+        "warnings": warnings_list
+    }
+
+
+# Index Health (MongoDB equivalent)
+
+@router.get("/index-health", summary="MongoDB collection index health")
+async def get_index_health(
+    current_admin: User = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Get index stats for MongoDB collections as a health check."""
+    if current_admin.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..db import client as motor_client
+    indexes = {}
+    table_sizes = {}
+    missing_indexes = 0
+    seq_scan_warnings = []
+
+    collection_names = [
+        "users", "campaigns", "workflows", "workflowinstances",
+        "workflowsteps", "contacts", "leads", "emailsends", "events"
+    ]
+
+    try:
+        if motor_client is not None:
+            db = motor_client.get_default_database(default="marketing_automation")
+            for collection_name in collection_names:
+                try:
+                    coll = db[collection_name]
+                    coll_indexes = await coll.index_information()
+                    count = await coll.estimated_document_count()
+                    stats = await db.command("collStats", collection_name)
+
+                    indexes[collection_name] = f"{len(coll_indexes)} indexes"
+                    table_sizes[collection_name] = {
+                        "total_size": f"{round(stats.get('totalSize', 0) / 1024, 1)} KB",
+                        "table_size": f"{round(stats.get('size', 0) / 1024, 1)} KB",
+                        "row_estimate": count
+                    }
+                except Exception:
+                    indexes[collection_name] = "unavailable"
+    except Exception as e:
+        logger.error(f"Failed to get index health: {e}")
+        seq_scan_warnings.append(f"Could not retrieve index stats: {str(e)}")
+
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "indexes": indexes,
+        "missing_indexes": missing_indexes,
+        "table_sizes": table_sizes,
+        "seq_scan_warnings": seq_scan_warnings,
+        "action_needed": seq_scan_warnings[0] if seq_scan_warnings else None
+    }

@@ -1,24 +1,23 @@
 """
 System health and monitoring endpoints.
-Provides real-time status of backend services, Celery workers, database, and Redis.
 """
-from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
+from fastapi import APIRouter
 import logging
+import os
+import base64
 from typing import Dict, Any
 from datetime import datetime
+from redis import Redis
 
-from ..db import get_db
+from ..db import check_db_connection
 from ..celery_app import celery_app
 from ..config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/system", tags=["system"])
 
-
 @router.get("/health")
-async def get_system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
+async def get_system_health() -> Dict[str, Any]:
     """
     Comprehensive system health check.
     Returns status of all critical components.
@@ -31,13 +30,15 @@ async def get_system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any
     
     # 1. Database Health
     try:
-        result = await db.execute(text("SELECT 1"))
-        result.scalar_one()
-        health_status["components"]["database"] = {
-            "status": "healthy",
-            "type": "postgresql",
-            "url": settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "configured"
-        }
+        is_healthy = await check_db_connection()
+        if is_healthy:
+            health_status["components"]["database"] = {
+                "status": "healthy",
+                "type": "mongodb",
+                "url": "configured"
+            }
+        else:
+            raise Exception("MongoDB ping failed")
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
         health_status["components"]["database"] = {
@@ -48,7 +49,6 @@ async def get_system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any
     
     # 2. Redis Health
     try:
-        from redis import Redis
         redis_client = Redis.from_url(settings.REDIS_URL)
         redis_client.ping()
         health_status["components"]["redis"] = {
@@ -65,9 +65,8 @@ async def get_system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any
     
     # 3. Celery Workers Health
     try:
-        from ..celery_app import celery_app
         inspect = celery_app.control.inspect()
-        active_workers = inspect.active()
+        active_workers = inspect.active() if inspect else None
         
         if active_workers:
             health_status["components"]["celery_workers"] = {
@@ -91,10 +90,7 @@ async def get_system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any
 
     # 4. Encryption Health
     try:
-        from ..services.settings import ENCRYPTION_KEY
-        import base64
-        import os
-        key_bytes = base64.urlsafe_b64decode(ENCRYPTION_KEY)
+        key_bytes = base64.urlsafe_b64decode(settings.SETTINGS_ENCRYPTION_KEY)
         health_status["components"]["encryption"] = {
             "status": "healthy",
             "key_length": len(key_bytes),
@@ -117,7 +113,6 @@ async def get_system_health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any
     
     return health_status
 
-
 @router.get("/workers")
 async def get_worker_status() -> Dict[str, Any]:
     """
@@ -125,8 +120,9 @@ async def get_worker_status() -> Dict[str, Any]:
     """
     try:
         inspect = celery_app.control.inspect()
-        
-        # Get various worker information
+        if not inspect:
+            raise Exception("Could not connect to celery worker inspect")
+            
         active_tasks = inspect.active()
         scheduled_tasks = inspect.scheduled()
         reserved_tasks = inspect.reserved()
@@ -162,7 +158,6 @@ async def get_worker_status() -> Dict[str, Any]:
             "error": str(e)
         }
 
-
 @router.get("/tasks/stats")
 async def get_task_statistics() -> Dict[str, Any]:
     """
@@ -170,7 +165,9 @@ async def get_task_statistics() -> Dict[str, Any]:
     """
     try:
         inspect = celery_app.control.inspect()
-        
+        if not inspect:
+            raise Exception("Could not connect to celery worker inspect")
+            
         active = inspect.active() or {}
         scheduled = inspect.scheduled() or {}
         reserved = inspect.reserved() or {}

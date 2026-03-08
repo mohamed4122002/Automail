@@ -23,6 +23,8 @@ class UserBase(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     is_active: bool = True
+    role: str = "team_member"
+    roles: List[str] = []
 
 class UserProfile(UserBase, IDSchema, TimestampSchema):
     model_config = ConfigDict(from_attributes=True)
@@ -37,6 +39,10 @@ class UserTimelineEvent(BaseModel):
     content: str
     date: str | datetime
     icon_type: Optional[str] = None
+
+class UserRoleUpdate(BaseModel):
+    role: str
+    roles: Optional[List[str]] = None
 
 class UserDetailResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

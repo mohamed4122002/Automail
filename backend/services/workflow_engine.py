@@ -1,66 +1,40 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-import sqlalchemy as sa
 from uuid import UUID
-from ..models import WorkflowInstance, WorkflowInstanceData
-from ..schemas.base import BaseResponse # Placeholder import
+from datetime import datetime
 
 class WorkflowEngineService:
-    def __init__(self, db: AsyncSession):
-        self.db = db
+    def __init__(self):
+        pass
 
     async def get_instance_data(self, instance_id: UUID) -> dict:
-        query = sa.select(WorkflowInstanceData).where(WorkflowInstanceData.instance_id == instance_id)
-        result = await self.db.execute(query)
-        data_obj = result.scalar_one_or_none()
+        from ..models import WorkflowInstanceData
+        data_obj = await WorkflowInstanceData.find_one(WorkflowInstanceData.instance_id == instance_id)
         return data_obj.data if data_obj else {}
 
     async def update_instance_data(self, instance_id: UUID, updates: dict):
         """
-        Atomically merges updates into WorkflowInstanceData.data using 
-        the PostgreSQL '||' JSONB operator to prevent race conditions.
+        Merge updates into WorkflowInstanceData.data.
         """
-        # 1. Try to update existing record atomically
-        # The '||' operator performs a top-level merge of two JSONB objects.
-        stmt = (
-            sa.update(WorkflowInstanceData)
-            .where(WorkflowInstanceData.instance_id == instance_id)
-            .values(data=sa.func.coalesce(WorkflowInstanceData.data, sa.text("'{}'::jsonb")) + sa.bindparam('updates', type_=sa.JSON))
-            .returning(WorkflowInstanceData.data)
-        )
+        from ..models import WorkflowInstanceData
+        data_obj = await WorkflowInstanceData.find_one(WorkflowInstanceData.instance_id == instance_id)
         
-        result = await self.db.execute(stmt, {"updates": updates})
-        updated_data = result.scalar_one_or_none()
-        
-        if updated_data is not None:
-            await self.db.commit()
-            return updated_data
-            
-        # 2. If no record was updated, create it
-        # We use a flush/commit pattern here. 
-        # In a high-concurrency race to insert, standard DB unique constraints will catch the error.
-        try:
+        if data_obj:
+            # Merge dictionaries
+            data_dict = data_obj.data or {}
+            data_dict.update(updates)
+            data_obj.data = data_dict
+            await data_obj.save()
+            return data_dict
+        else:
             data_obj = WorkflowInstanceData(instance_id=instance_id, data=updates)
-            self.db.add(data_obj)
-            await self.db.commit()
+            await data_obj.insert()
             return updates
-        except sa.exc.IntegrityError:
-            # Another task inserted it just now; retry the atomic update once
-            await self.db.rollback()
-            # Re-fetch it after conflict
-            result = await self.db.execute(stmt, {"updates": updates})
-            updated_data = result.scalar_one()
-            await self.db.commit()
-            return updated_data
 
     async def get_instance_snapshots(self, instance_id: UUID) -> list:
         from ..models import WorkflowSnapshot
-        query = (
-            sa.select(WorkflowSnapshot)
-            .where(WorkflowSnapshot.instance_id == instance_id)
-            .order_by(WorkflowSnapshot.created_at.asc())
-        )
-        result = await self.db.execute(query)
-        snapshots = result.scalars().all()
+        snapshots = await WorkflowSnapshot.find(
+            WorkflowSnapshot.instance_id == instance_id
+        ).sort("created_at").to_list()
+        
         return [
             {
                 "id": str(s.id),

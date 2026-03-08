@@ -1,17 +1,13 @@
-from fastapi import APIRouter, Depends, BackgroundTasks
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter
 from uuid import UUID
-from ..db import get_db
 from ..services.workflow_engine import WorkflowEngineService
-from ..schemas.base import BaseResponse
 
 router = APIRouter(prefix="/workflow-runtime", tags=["workflow-runtime"])
 
 @router.post("/instances/{id}/run-step")
 async def run_step(
     id: UUID, 
-    node_id: UUID | None = None,
-    db: AsyncSession = Depends(get_db)
+    node_id: UUID | None = None
 ):
     # This endpoint is primarily for testing manual triggers or debugging
     # Real execution happens via Celery
@@ -20,11 +16,11 @@ async def run_step(
     return {"status": "queued", "instance_id": id}
 
 @router.get("/instances/{id}/data")
-async def get_instance_data(id: UUID, db: AsyncSession = Depends(get_db)):
-    service = WorkflowEngineService(db)
+async def get_instance_data(id: UUID):
+    service = WorkflowEngineService()
     return await service.get_instance_data(id)
 
 @router.get("/instances/{id}/snapshots")
-async def get_instance_snapshots(id: UUID, db: AsyncSession = Depends(get_db)):
-    service = WorkflowEngineService(db)
+async def get_instance_snapshots(id: UUID):
+    service = WorkflowEngineService()
     return await service.get_instance_snapshots(id)

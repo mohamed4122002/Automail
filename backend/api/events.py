@@ -1,19 +1,12 @@
 from typing import List
-
-import sqlalchemy as sa
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import get_current_active_user
-from ..db import get_db
 from ..models import Event
-
 
 router = APIRouter(
     prefix="/api/events",
-    tags=["events"],
-    dependencies=[Depends(get_current_active_user)],
+    tags=["events"]
 )
 
 
@@ -28,17 +21,20 @@ class EventOut(BaseModel):
     metadata: dict | None = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 @router.get("/", response_model=List[EventOut])
-async def list_events(
-    limit: int = 100, db: AsyncSession = Depends(get_db)
-) -> list[Event]:
-    result = await db.execute(
-        sa.select(Event)
-        .order_by(Event.created_at.desc())
-        .limit(min(limit, 500))
-    )
-    return list(result.scalars().all())
-
+async def list_events(limit: int = 100):
+    events = await Event.find_all().sort("-created_at").limit(min(limit, 500)).to_list()
+    # Convert object id to str manually if needed, but Pydantic should handle if set up correctly
+    return [EventOut(
+        id=str(e.id),
+        type=e.type,
+        user_id=str(e.user_id) if e.user_id else None,
+        campaign_id=str(e.campaign_id) if e.campaign_id else None,
+        workflow_id=str(e.workflow_id) if e.workflow_id else None,
+        workflow_step_id=str(e.workflow_step_id) if e.workflow_step_id else None,
+        email_send_id=str(e.email_send_id) if e.email_send_id else None,
+        metadata=e.metadata
+    ) for e in events]
