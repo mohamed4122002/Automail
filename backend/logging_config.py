@@ -42,7 +42,7 @@ def setup_logging():
     
     # Set levels for noisy libraries
     logging.getLogger('uvicorn').setLevel(logging.INFO)
-    logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
+    logging.getLogger('motor').setLevel(logging.WARNING)
     logging.getLogger('connect.main').setLevel(logging.WARNING) # Noisy sometimes
 
 def get_logger(name: str):

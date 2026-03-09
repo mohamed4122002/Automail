@@ -1,7 +1,6 @@
 import asyncio
 import logging
-from sqlalchemy import text
-from backend.db import AsyncSessionLocal
+from backend.db import init_db, close_db
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -12,15 +11,15 @@ async def wait_for_db():
     logger.info("Waiting for database connection...")
     for i in range(60):
         try:
-            async with AsyncSessionLocal() as session:
-                # Basic check to see if we can talk to the database
-                await session.execute(text("SELECT 1"))
+            # init_db will raise an exception if MongoDB is not available
+            await init_db()
             logger.info("Database is ready.")
+            await close_db()
             return
         except Exception as e:
-            await asyncio.sleep(1)
             if i % 5 == 0:
-                logger.info(f"Database unavailable, retrying ({i+1}/60)...")
+                logger.info(f"Database unavailable, retrying ({i+1}/60)... error: {e}")
+            await asyncio.sleep(1)
     raise Exception("Database not available after 60 seconds.")
 
 if __name__ == "__main__":

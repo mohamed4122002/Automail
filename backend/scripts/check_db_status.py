@@ -1,33 +1,30 @@
 import asyncio
-from backend.db import AsyncSessionLocal
+import sys
+import os
+
+# Add the project root to sys.path to allow importing the 'backend' package
+sys.path.append(os.getcwd())
+
+from backend.db import init_db, close_db
 from backend.models import WorkflowInstance, EmailSend, WorkflowStep
-from sqlalchemy import select, func
 
 async def check_status():
-    async with AsyncSessionLocal() as db:
+    await init_db()
+    try:
         # Count workflow instances
-        wi_result = await db.execute(select(func.count(WorkflowInstance.id)))
-        wi_count = wi_result.scalar_one()
+        wi_count = await WorkflowInstance.count()
         
         # Count email sends
-        es_result = await db.execute(select(func.count(EmailSend.id)))
-        es_count = es_result.scalar_one()
+        es_count = await EmailSend.count()
         
         # Count workflow steps
-        ws_result = await db.execute(select(func.count(WorkflowStep.id)))
-        ws_count = ws_result.scalar_one()
+        ws_count = await WorkflowStep.count()
         
         # Get recent workflow instances
-        wi_query = await db.execute(
-            select(WorkflowInstance).order_by(WorkflowInstance.created_at.desc()).limit(5)
-        )
-        instances = wi_query.scalars().all()
+        instances = await WorkflowInstance.find_all().sort("-created_at").limit(5).to_list()
         
         # Get recent email sends
-        es_query = await db.execute(
-            select(EmailSend).order_by(EmailSend.created_at.desc()).limit(5)
-        )
-        emails = es_query.scalars().all()
+        emails = await EmailSend.find_all().sort("-created_at").limit(5).to_list()
         
         print(f"=== DATABASE STATUS ===")
         print(f"Total WorkflowInstances: {wi_count}")
@@ -40,6 +37,8 @@ async def check_status():
         print(f"\nRecent Email Sends:")
         for email in emails:
             print(f"  - {email.id}: to={email.to_email}, status={email.status}, created={email.created_at}")
+    finally:
+        await close_db()
 
 if __name__ == "__main__":
     asyncio.run(check_status())

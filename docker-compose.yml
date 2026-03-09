@@ -25,7 +25,6 @@ services:
     environment:
       MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
       REDIS_URL: "redis://redis:6379/0"
-      RUN_MIGRATIONS: "0"
       RUN_SEED: "1"
     env_file:
       - .env
@@ -51,7 +50,6 @@ services:
     environment:
       MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
       REDIS_URL: "redis://redis:6379/0"
-      RUN_MIGRATIONS: "0"
       RUN_SEED: "0"
     env_file:
       - .env
@@ -75,7 +73,6 @@ services:
     environment:
       MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
       REDIS_URL: "redis://redis:6379/0"
-      RUN_MIGRATIONS: "0"
       RUN_SEED: "0"
     env_file:
       - .env

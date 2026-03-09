@@ -1,25 +1,33 @@
 import asyncio
-from backend.db import AsyncSessionLocal
+import sys
+import os
+
+# Add the project root to sys.path to allow importing the 'backend' package
+sys.path.append(os.getcwd())
+
+from backend.db import init_db, close_db
 from backend.models import Campaign, Contact, ContactList, WorkflowInstance
-from sqlalchemy import select, func
 
 async def check_db():
-    async with AsyncSessionLocal() as db:
+    await init_db()
+    try:
         # Check campaigns
-        campaign_count = await db.execute(select(func.count(Campaign.id)))
-        print(f"Campaigns: {campaign_count.scalar_one()}")
+        campaign_count = await Campaign.count()
+        print(f"Campaigns: {campaign_count}")
         
         # Check contact lists
-        list_count = await db.execute(select(func.count(ContactList.id)))
-        print(f"Contact Lists: {list_count.scalar_one()}")
+        list_count = await ContactList.count()
+        print(f"Contact Lists: {list_count}")
         
         # Check contacts
-        contact_count = await db.execute(select(func.count(Contact.id)))
-        print(f"Contacts: {contact_count.scalar_one()}")
+        contact_count = await Contact.count()
+        print(f"Contacts: {contact_count}")
         
         # Check workflow instances
-        wi_count = await db.execute(select(func.count(WorkflowInstance.id)))
-        print(f"Workflow Instances: {wi_count.scalar_one()}")
+        wi_count = await WorkflowInstance.count()
+        print(f"Workflow Instances: {wi_count}")
+    finally:
+        await close_db()
 
 if __name__ == "__main__":
     asyncio.run(check_db())

@@ -3,28 +3,30 @@ import os
 import asyncio
 
 # Ensure backend matches the path structure
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.append(os.getcwd())
 
-from backend.core.async_runner import run_async
+from backend.db import init_db, close_db
 from backend.email_providers import get_email_provider
-from backend.core.db import task_context
 
 async def verify():
-    print("Initializing task context...")
-    async with task_context() as db:
-        print("Task context active. Requesting email provider...")
-        provider = await get_email_provider(db)
+    print("Initializing MongoDB connection...")
+    try:
+        await init_db()
+        print("Database initialized. Requesting email provider...")
+        provider = await get_email_provider()
         
         if provider:
             print(f"✅ Provider initialized safely: {type(provider).__name__}")
         else:
             print("❌ Failed to initialize provider")
             sys.exit(1)
+    finally:
+        await close_db()
 
 if __name__ == "__main__":
     print("Starting Provider Safety Verification...")
     try:
-        run_async(verify())
+        asyncio.run(verify())
         print("✅ Verification Complete")
     except Exception as e:
         print(f"❌ Verification Failed: {e}")

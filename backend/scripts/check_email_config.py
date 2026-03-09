@@ -1,11 +1,17 @@
 import asyncio
-from backend.core.db import task_context
+import sys
+import os
+
+sys.path.append(os.getcwd())
+
+from backend.db import init_db, close_db
 from backend.services.settings import SettingsService
 from backend.email_providers import get_email_provider
 
 async def check_provider():
-    async with task_context() as db:
-        service = SettingsService(db)
+    try:
+        await init_db()
+        service = SettingsService() # SettingsService no longer needs db session passed in
         setting = await service.get_setting("email_provider")
         
         print("-" * 50)
@@ -21,9 +27,11 @@ async def check_provider():
         else:
             print("Setting 'email_provider' NOT FOUND in database.")
         
-        provider = await get_email_provider(db)
+        provider = await get_email_provider() # get_email_provider no longer needs db session
         print(f"Active Provider Instance: {type(provider).__name__}")
         print("-" * 50)
+    finally:
+        await close_db()
 
 if __name__ == "__main__":
     asyncio.run(check_provider())

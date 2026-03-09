@@ -4,7 +4,10 @@ import os
 from pprint import pprint
 
 # Ensure backend matches the path structure
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.append(os.getcwd())
+
+from backend.db import init_db, close_db
+from backend.email_providers import get_email_provider
 
 async def check_health():
     print("=== Event Loop Health Check ===")
@@ -17,28 +20,26 @@ async def check_health():
         print("❌ No running loop detected!")
         return
 
-    print("\n=== Global Object Audit ===")
+    print("\n=== Database Connection Check ===")
     try:
-        from backend.db import AsyncSessionLocal, engine
-        print(f"Global Engine: {engine}")
-        print(f"Global Session Factory: {AsyncSessionLocal}")
-    except ImportError:
-        print("Could not import global DB objects (Good if we want to avoid them?)")
+        await init_db()
+        from backend.db import check_db_connection
+        is_connected = await check_db_connection()
+        print(f"✅ MongoDB Connection Check: {'Success' if is_connected else 'Failed'}")
+    except Exception as e:
+        print(f"❌ Database connection failed: {e}")
 
     print("\n=== Email Provider Check ===")
     try:
-        from backend.email_providers import get_email_provider
-        from backend.core.db import task_context
-        
-        async with task_context() as db:
-            provider = await get_email_provider(db)
-            print(f"✅ Provider initialized in task context: {type(provider).__name__}")
+        provider = await get_email_provider()
+        print(f"✅ Provider initialized: {type(provider).__name__}")
     except Exception as e:
         print(f"❌ Provider check failed: {e}")
+    finally:
+        await close_db()
 
 if __name__ == "__main__":
-    from backend.core.async_runner import run_async
     try:
-        run_async(check_health())
+        asyncio.run(check_health())
     except Exception as e:
         print(f"Health check failed: {e}")

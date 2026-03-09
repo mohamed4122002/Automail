@@ -1,23 +1,27 @@
 import asyncio
 import sys
 import logging
-from sqlalchemy import text
 from redis import Redis
-from backend.db import AsyncSessionLocal
+from backend.db import init_db, close_db, check_db_connection
 from backend.config import settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-async def check_postgres():
+async def check_mongodb():
     try:
-        async with AsyncSessionLocal() as session:
-            await session.execute(text("SELECT 1"))
-        logger.info("✅ PostgreSQL: HEALTHY")
-        return True
+        await init_db()
+        is_healthy = await check_db_connection()
+        await close_db()
+        if is_healthy:
+            logger.info("✅ MongoDB: HEALTHY")
+            return True
+        else:
+            logger.error("❌ MongoDB: UNHEALTHY")
+            return False
     except Exception as e:
-        logger.error(f"❌ PostgreSQL: UNHEALTHY ({e})")
+        logger.error(f"❌ MongoDB: UNHEALTHY ({e})")
         return False
 
 def check_redis():
@@ -49,7 +53,7 @@ async def main():
     logger.info("🔍 Starting System Health Check...")
     
     results = await asyncio.gather(
-        check_postgres(),
+        check_mongodb(),
         asyncio.to_thread(check_redis),
         check_celery()
     )

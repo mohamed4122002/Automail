@@ -1,4 +1,0 @@
-Alembic migrations for the Marketing Automation Platform.
-
-Use `alembic revision --autogenerate -m "message"` and `alembic upgrade head`.
-

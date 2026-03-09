@@ -1,19 +1,17 @@
 import asyncio
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
-from backend.config import settings
+import sys
+import os
+
+# Add the project root to sys.path to allow importing the 'backend' package
+sys.path.append(os.getcwd())
+
+from backend.db import init_db, close_db
 from backend.services.settings import SettingsService
 
 async def init_defaults():
-    url = settings.DATABASE_URL
-    if url.startswith("postgresql://"):
-        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    
-    engine = create_async_engine(url)
-    AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    
-    async with AsyncSessionLocal() as db:
-        service = SettingsService(db)
+    await init_db()
+    try:
+        service = SettingsService()
         
         # Default SMTP configuration found in frontend
         default_config = {
@@ -36,8 +34,8 @@ async def init_defaults():
             description="Default Gmail SMTP configuration"
         )
         print("SUCCESS: Default configuration applied.")
-
-    await engine.dispose()
+    finally:
+        await close_db()
 
 if __name__ == "__main__":
     asyncio.run(init_defaults())

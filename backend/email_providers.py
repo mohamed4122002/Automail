@@ -353,31 +353,16 @@ class ConsoleProvider(EmailProvider):
         return True
 
 
-async def get_email_provider(db: Optional["AsyncSession"] = None) -> EmailProvider:
+async def get_email_provider() -> EmailProvider:
     """
-    Get the configured email provider from Settings table.
-    Falls back to Console provider if no configuration found.
-    
-    Args:
-        db: Optional database session. If provided, uses this session (SAFE).
-            If not provided, creates a new session using global engine (UNSAFE in tasks).
+    Get the configured email provider from Settings table (MongoDB/Beanie).
     """
     try:
-        from .db import AsyncSessionLocal
         from .services.settings import SettingsService
-        from sqlalchemy.ext.asyncio import AsyncSession
         
-        if db:
-            # Use provided safe session
-            service = SettingsService(db)
-            setting = await service.get_setting("email_provider")
-            return await _create_provider_from_setting(setting)
-        
-        # Fallback to global session (only for non-task usage)
-        async with AsyncSessionLocal() as session:
-            service = SettingsService(session)
-            setting = await service.get_setting("email_provider")
-            return await _create_provider_from_setting(setting)
+        service = SettingsService()
+        setting = await service.get_setting("email_provider")
+        return await _create_provider_from_setting(setting)
 
     except Exception as e:
         logger.error(f"Failed to load email provider config: {e}")

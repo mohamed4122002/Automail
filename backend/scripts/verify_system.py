@@ -4,10 +4,12 @@ Tests all components: database, Redis, Celery workers, and campaign activation.
 """
 import asyncio
 import sys
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
+import os
 
-from backend.db import AsyncSessionLocal
+# Add the project root to sys.path to allow importing the 'backend' package
+sys.path.append(os.getcwd())
+
+from backend.db import init_db, close_db
 from backend.models import (
     Campaign, Workflow, WorkflowNode, WorkflowEdge, WorkflowInstance,
     Contact, ContactList, User, EmailTemplate, EmailSend
@@ -26,23 +28,17 @@ async def check_database():
     logger.info("=" * 60)
     
     try:
-        async with AsyncSessionLocal() as db:
-            # Test connection
-            result = await db.execute(select(func.count(Campaign.id)))
-            campaign_count = result.scalar_one()
-            
-            result = await db.execute(select(func.count(Workflow.id)))
-            workflow_count = result.scalar_one()
-            
-            result = await db.execute(select(func.count(Contact.id)))
-            contact_count = result.scalar_one()
-            
-            logger.info(f"✓ Database connected successfully")
-            logger.info(f"  - Campaigns: {campaign_count}")
-            logger.info(f"  - Workflows: {workflow_count}")
-            logger.info(f"  - Contacts: {contact_count}")
-            
-            return True
+        await init_db()
+        campaign_count = await Campaign.count()
+        workflow_count = await Workflow.count()
+        contact_count = await Contact.count()
+        
+        logger.info(f"✓ Database connected successfully")
+        logger.info(f"  - Campaigns: {campaign_count}")
+        logger.info(f"  - Workflows: {workflow_count}")
+        logger.info(f"  - Contacts: {contact_count}")
+        
+        return True
     except Exception as e:
         logger.error(f"✗ Database check failed: {e}")
         return False
@@ -58,7 +54,7 @@ def check_redis():
         from redis import Redis
         from backend.config import settings
         
-        redis_client = Redis.from_url(settings.REDIS_URL)
+        redis_client = Redis.from_url(settings.REDIS_URL, socket_timeout=5)
         redis_client.ping()
         
         logger.info(f"✓ Redis connected successfully")
@@ -109,66 +105,56 @@ async def check_test_data():
     logger.info("=" * 60)
     
     try:
-        async with AsyncSessionLocal() as db:
-            # Check for campaigns
-            result = await db.execute(select(Campaign).limit(1))
-            campaign = result.scalar_one_or_none()
-            
-            if not campaign:
-                logger.warning("⚠ No campaigns found. Please create a campaign first.")
-                return False
-            
-            logger.info(f"✓ Found campaign: {campaign.name}")
-            
-            # Check if campaign has contact list
-            if not campaign.contact_list_id:
-                logger.warning(f"⚠ Campaign '{campaign.name}' has no contact list assigned")
-                return False
-            
-            # Check for contacts
-            result = await db.execute(
-                select(func.count(Contact.id)).where(Contact.contact_list_id == campaign.contact_list_id)
-            )
-            contact_count = result.scalar_one()
-            
-            if contact_count == 0:
-                logger.warning(f"⚠ Contact list has no contacts")
-                return False
-            
-            logger.info(f"✓ Contact list has {contact_count} contact(s)")
-            
-            # Check for workflow
-            result = await db.execute(
-                select(Workflow).where(Workflow.campaign_id == campaign.id)
-            )
-            workflow = result.scalar_one_or_none()
-            
+        # Check for campaigns
+        campaign = await Campaign.find_one()
+        
+        if not campaign:
+            logger.warning("⚠ No campaigns found. Please create a campaign first.")
+            return False
+        
+        logger.info(f"✓ Found campaign: {campaign.name}")
+        
+        # Check if campaign has contact list
+        if not campaign.contact_list_id:
+            logger.warning(f"⚠ Campaign '{campaign.name}' has no contact list assigned")
+            return False
+        
+        # Check for contacts
+        contact_count = await Contact.find(Contact.contact_list_id == campaign.contact_list_id).count()
+        
+        if contact_count == 0:
+            logger.warning(f"⚠ Contact list has no contacts")
+            return False
+        
+        logger.info(f"✓ Contact list has {contact_count} contact(s)")
+        
+        # Check for workflow
+        workflow = await Workflow.find_one(Workflow.campaign_id == campaign.id)
+        
+        if not workflow:
+            # Try finding any workflow as fallback (legacy compatibility)
+            workflow = await Workflow.find_one()
             if not workflow:
                 logger.warning(f"⚠ Campaign '{campaign.name}' has no workflow")
                 return False
-            
-            logger.info(f"✓ Found workflow: {workflow.name}")
-            
-            # Check workflow nodes
-            result = await db.execute(
-                select(func.count(WorkflowNode.id)).where(WorkflowNode.workflow_id == workflow.id)
-            )
-            node_count = result.scalar_one()
-            
-            logger.info(f"✓ Workflow has {node_count} node(s)")
-            
-            # Check for email template
-            result = await db.execute(select(EmailTemplate).limit(1))
-            template = result.scalar_one_or_none()
-            
-            if not template:
-                logger.warning("⚠ No email templates found")
-                return False
-            
-            logger.info(f"✓ Found email template: {template.name}")
-            
-            return True
-            
+        
+        logger.info(f"✓ Found workflow: {workflow.name}")
+        
+        # Check workflow nodes
+        node_count = await WorkflowNode.find(WorkflowNode.workflow_id == workflow.id).count()
+        
+        logger.info(f"✓ Workflow has {node_count} node(s)")
+        
+        # Check for email template
+        template = await EmailTemplate.find_one()
+        
+        if not template:
+            logger.warning("⚠ No email templates found")
+            return False
+        
+        logger.info(f"✓ Found email template: {template.name}")
+        
+        return True
     except Exception as e:
         logger.error(f"✗ Test data check failed: {e}")
         return False
@@ -181,39 +167,31 @@ async def test_campaign_activation():
     logger.info("=" * 60)
     
     try:
-        async with AsyncSessionLocal() as db:
-            # Get first campaign
-            result = await db.execute(select(Campaign).limit(1))
-            campaign = result.scalar_one_or_none()
-            
-            if not campaign:
-                logger.error("✗ No campaign available for testing")
-                return False
-            
-            logger.info(f"Testing activation of campaign: {campaign.name}")
-            
-            # Activate campaign
-            manager = CampaignManagerService(db)
-            result = await manager.activate_campaign(campaign.id, campaign.owner_id)
-            
-            logger.info(f"✓ Campaign activation result:")
-            logger.info(f"  - Message: {result['message']}")
-            logger.info(f"  - Contacts processed: {result['contacts_processed']}")
-            logger.info(f"  - Instances started: {result['instances_started']}")
-            logger.info(f"  - Tasks dispatched: {result['tasks_dispatched']}")
-            
-            # Verify workflow instances were created
-            await db.commit()
-            
-            result_check = await db.execute(
-                select(func.count(WorkflowInstance.id))
-            )
-            instance_count = result_check.scalar_one()
-            
-            logger.info(f"✓ Total workflow instances in database: {instance_count}")
-            
-            return True
-            
+        # Get first campaign
+        campaign = await Campaign.find_one()
+        
+        if not campaign:
+            logger.error("✗ No campaign available for testing")
+            return False
+        
+        logger.info(f"Testing activation of campaign: {campaign.name}")
+        
+        # Activate campaign
+        manager = CampaignManagerService()
+        result = await manager.activate_campaign(campaign.id, campaign.owner_id)
+        
+        logger.info(f"✓ Campaign activation result:")
+        logger.info(f"  - Message: {result['message']}")
+        logger.info(f"  - Contacts processed: {result.get('contacts_processed', 0)}")
+        logger.info(f"  - Instances started: {result.get('instances_started', 0)}")
+        logger.info(f"  - Tasks dispatched: {result.get('tasks_dispatched', 0)}")
+        
+        # Verify workflow instances were created
+        instance_count = await WorkflowInstance.count()
+        
+        logger.info(f"✓ Total workflow instances in database: {instance_count}")
+        
+        return True
     except Exception as e:
         logger.error(f"✗ Campaign activation test failed: {e}", exc_info=True)
         return False
@@ -225,36 +203,42 @@ async def main():
     logger.info("🚀 CAMPAIGN EXECUTION SYSTEM VERIFICATION")
     logger.info("=" * 60)
     
-    results = {
-        "Database": await check_database(),
-        "Redis": check_redis(),
-        "Celery Workers": check_celery_workers(),
-        "Test Data": await check_test_data(),
-    }
+    # Initialize DB once
+    await init_db()
     
-    # Only test activation if all prerequisites pass
-    if all(results.values()):
-        results["Campaign Activation"] = await test_campaign_activation()
-    else:
-        logger.warning("\n⚠ Skipping campaign activation test due to failed prerequisites")
-    
-    # Summary
-    logger.info("\n" + "=" * 60)
-    logger.info("VERIFICATION SUMMARY")
-    logger.info("=" * 60)
-    
-    for check, passed in results.items():
-        status = "✓ PASS" if passed else "✗ FAIL"
-        logger.info(f"{status}: {check}")
-    
-    all_passed = all(results.values())
-    
-    if all_passed:
-        logger.info("\n🎉 ALL CHECKS PASSED! Campaign execution system is ready.")
-        return 0
-    else:
-        logger.error("\n❌ SOME CHECKS FAILED. Please review the errors above.")
-        return 1
+    try:
+        results = {
+            "Database": await check_database(),
+            "Redis": check_redis(),
+            "Celery Workers": check_celery_workers(),
+            "Test Data": await check_test_data(),
+        }
+        
+        # Only test activation if all prerequisites pass
+        if all(results.values()):
+            results["Campaign Activation"] = await test_campaign_activation()
+        else:
+            logger.warning("\n⚠ Skipping campaign activation test due to failed prerequisites")
+        
+        # Summary
+        logger.info("\n" + "=" * 60)
+        logger.info("VERIFICATION SUMMARY")
+        logger.info("=" * 60)
+        
+        for check, passed in results.items():
+            status = "✓ PASS" if passed else "✗ FAIL"
+            logger.info(f"{status}: {check}")
+        
+        all_passed = all(results.values())
+        
+        if all_passed:
+            logger.info("\n🎉 ALL CHECKS PASSED! Campaign execution system is ready.")
+            return 0
+        else:
+            logger.error("\n❌ SOME CHECKS FAILED. Please review the errors above.")
+            return 1
+    finally:
+        await close_db()
 
 
 if __name__ == "__main__":
