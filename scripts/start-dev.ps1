@@ -16,7 +16,7 @@ Write-Host "✓ Docker is running" -ForegroundColor Green
 Write-Host ""
 
 # Start infrastructure with Docker Compose
-Write-Host "📦 Starting infrastructure (PostgreSQL, Redis, Backend, Celery Worker, Celery Beat)..." -ForegroundColor Yellow
+Write-Host "📦 Starting infrastructure (MongoDB, Redis, Backend, Celery Worker, Celery Beat)..." -ForegroundColor Yellow
 docker-compose up -d
 
 if ($LASTEXITCODE -ne 0) {
@@ -39,7 +39,7 @@ Write-Host ""
 Write-Host "📋 Service URLs:" -ForegroundColor Cyan
 Write-Host "   - Backend API: http://localhost:8000" -ForegroundColor White
 Write-Host "   - API Docs: http://localhost:8000/docs" -ForegroundColor White
-Write-Host "   - PostgreSQL: localhost:5432" -ForegroundColor White
+Write-Host "   - MongoDB: localhost:27018" -ForegroundColor White
 Write-Host "   - Redis: localhost:6379" -ForegroundColor White
 Write-Host ""
 Write-Host "🔧 Useful Commands:" -ForegroundColor Cyan

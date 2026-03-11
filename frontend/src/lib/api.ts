@@ -8,16 +8,20 @@ const api = axios.create({
   },
 });
 
-// Add a request interceptor for auth token (placeholder for now)
+// Add a request interceptor for auth token and idempotency keys
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("auth_token");
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
-      // console.log(`[API] Attaching token to ${config.url}`);
-    } else {
-      console.warn(`[API] No auth_token found for ${config.url}`);
     }
+
+    // Attach Idempotency-Key for mutating requests if not already present
+    const mutatingMethods = ["post", "patch", "put", "delete"];
+    if (mutatingMethods.includes(config.method || "") && !config.headers["Idempotency-Key"]) {
+      config.headers["Idempotency-Key"] = crypto.randomUUID();
+    }
+
     return config;
   },
   (error) => Promise.reject(error)

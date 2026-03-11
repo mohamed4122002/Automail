@@ -17,6 +17,7 @@ from .models import (
     Lead,
     LeadStatusEnum,
     User,
+    Organization,
     WorkflowEdge,
     WorkflowInstance,
     WorkflowNode,
@@ -771,6 +772,17 @@ def import_contacts_task(self, contact_list_id: str, file_id: str, mapping: Dict
 
                 if len(contacts_to_insert) >= batch_size:
                     for c in contacts_to_insert:
+                        # Find company if mapped
+                        company_col = mapping.get("Company")
+                        company_name = c.attributes.get(company_col) if company_col else None
+                        
+                        if company_name:
+                            org = await Organization.find_one(Organization.name == company_name)
+                            if not org:
+                                org = Organization(name=company_name)
+                                await org.insert()
+                            c.organization_id = org.id
+
                         # Insert ignores duplicates on email in the model level if we use beanie insert safely
                         existing = await Contact.find_one(Contact.contact_list_id == cl_uuid, Contact.email == c.email)
                         if not existing:
@@ -781,6 +793,17 @@ def import_contacts_task(self, contact_list_id: str, file_id: str, mapping: Dict
 
             if contacts_to_insert:
                 for c in contacts_to_insert:
+                    # Find company if mapped
+                    company_col = mapping.get("Company")
+                    company_name = c.attributes.get(company_col) if company_col else None
+                    
+                    if company_name:
+                        org = await Organization.find_one(Organization.name == company_name)
+                        if not org:
+                            org = Organization(name=company_name)
+                            await org.insert()
+                        c.organization_id = org.id
+
                     existing = await Contact.find_one(Contact.contact_list_id == cl_uuid, Contact.email == c.email)
                     if not existing:
                         await c.insert()
@@ -794,9 +817,17 @@ def import_contacts_task(self, contact_list_id: str, file_id: str, mapping: Dict
             existing_lead_cids = {l.contact_id for l in existing_leads}
             
             new_leads = []
-            for cid in contact_ids:
-                if cid not in existing_lead_cids:
-                    new_leads.append(Lead(contact_id=cid, lead_status=LeadStatusEnum.new))
+            for contact in all_list_contacts:
+                if contact.id not in existing_lead_cids:
+                    company_col = mapping.get("Company")
+                    company_name = contact.attributes.get(company_col) or "TBD"
+                    
+                    new_leads.append(Lead(
+                        contact_id=contact.id, 
+                        lead_status=LeadStatusEnum.new,
+                        company_name=company_name,
+                        organization_id=contact.organization_id
+                    ))
                     
             if new_leads:
                 for l in new_leads:
@@ -965,3 +996,144 @@ def sync_dashboard_metrics():
         logger.info("Dashboard metrics synced successfully.")
         
     run_async(_sync())
+
+@celery_app.task(name="send_meeting_reminders")
+def send_meeting_reminders():
+    """
+    Find meetings starting in ~30 minutes and send notifications.
+    """
+    from .services.notifications import NotificationService
+    from .models import CRMActivity, ActivityType
+    
+    async def _run():
+        now = datetime.utcnow()
+        remind_time = now + timedelta(minutes=30)
+        # Find meetings happening in the next 30-45 minutes that haven't been reminded
+        # We assume metadata contains 'start_time' for meetings
+        activities = await CRMActivity.find(
+            CRMActivity.type == ActivityType.MEETING,
+            CRMActivity.meeting_reminder_sent == False
+        ).to_list()
+        
+        for activity in activities:
+            start_str = activity.metadata.get("start_time")
+            if not start_str:
+                continue
+            
+            try:
+                start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                # If meeting is between now and +35 mins
+                if now <= start_dt <= now + timedelta(minutes=35):
+                    if activity.user_id:
+                        await NotificationService.create_notification(
+                            user_id=activity.user_id,
+                            title="Upcoming Meeting Reminder",
+                            message=f"You have a meeting soon: {activity.content}",
+                            type="warning",
+                            link=f"/leads/{str(activity.lead_id)}"
+                        )
+                        activity.meeting_reminder_sent = True
+                        await activity.save()
+                        logger.info(f"Sent reminder for meeting activity {activity.id}")
+            except Exception as e:
+                logger.error(f"Error parsing meeting start time: {e}")
+
+    run_async(_run())
+
+@celery_app.task(name="send_daily_digest")
+def send_daily_digest():
+    """
+    Send a daily summary of meetings and tasks to each user.
+    """
+    from .services.notifications import NotificationService
+    from .models import CRMActivity, CRMTask, User, ActivityType, TaskStatus
+    
+    async def _run():
+        users = await User.find_all().to_list()
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+        
+        for user in users:
+            # 1. Count today's meetings
+            # Note: This is an approximation based on start_time in metadata
+            meetings_today = 0
+            all_meetings = await CRMActivity.find(
+                CRMActivity.type == ActivityType.MEETING,
+                CRMActivity.user_id == user.id
+            ).to_list()
+            
+            for m in all_meetings:
+                start_str = m.metadata.get("start_time")
+                if start_str:
+                    try:
+                        start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                        if today_start <= start_dt <= today_end:
+                            meetings_today += 1
+                    except: continue
+
+            # 2. Count overdue tasks
+            overdue_tasks = await CRMTask.count(
+                CRMTask.assigned_to_id == user.id,
+                CRMTask.status == TaskStatus.PENDING,
+                CRMTask.due_date < datetime.utcnow()
+            )
+            
+            if meetings_today > 0 or overdue_tasks > 0:
+                await NotificationService.create_notification(
+                    user_id=user.id,
+                    title="Your Daily Digest",
+                    message=f"Today's Overview: {meetings_today} meetings, {overdue_tasks} overdue tasks.",
+                    type="info",
+                    link="/dashboard"
+                )
+                logger.info(f"Sent daily digest to user {user.email}")
+
+    run_async(_run())
+    
+@celery_app.task(name="check_proposal_deadlines", bind=True)
+def check_proposal_deadlines(self) -> None:
+    """
+    Scans for leads with upcoming proposal deadlines and notifies 
+    both the assigned member and their manager.
+    """
+    async def _run() -> None:
+        from .services.notifications import NotificationService
+        
+        # Look for deadlines in the next 24 hours that haven't been alerted
+        now = datetime.utcnow()
+        alert_window = now + timedelta(hours=24)
+        
+        leads = await Lead.find(
+            Lead.proposal_deadline > now,
+            Lead.proposal_deadline <= alert_window,
+            Lead.deadline_reminder_sent == False,
+            Lead.assigned_to_id != None
+        ).to_list()
+        
+        for lead in leads:
+            # 1. Notify Assigned Member
+            await NotificationService.create_notification(
+                user_id=lead.assigned_to_id,
+                title="Proposal Deadline Approaching",
+                message=f"The proposal deadline for {lead.company_name} is tomorrow!",
+                type="warning",
+                link=f"/leads/{str(lead.id)}"
+            )
+            
+            # 2. Notify Manager
+            assignee = await User.find_one(User.id == lead.assigned_to_id)
+            if assignee and assignee.manager_id:
+                await NotificationService.create_notification(
+                    user_id=assignee.manager_id,
+                    title="Team Proposal Deadline",
+                    message=f"A proposal deadline for {assignee.first_name or assignee.email}'s lead ({lead.company_name}) is tomorrow.",
+                    type="info",
+                    link=f"/leads/{str(lead.id)}"
+                )
+            
+            # Mark as sent
+            lead.deadline_reminder_sent = True
+            await lead.save()
+            logger.info(f"Sent deadline alerts for lead {lead.id}")
+
+    run_async(_run())

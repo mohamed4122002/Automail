@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Layout from '../components/layout/Layout';
 import { Card } from '../components/ui/Card';
+import { DataTable } from '../components/ui/DataTable';
 import api from '../lib/api';
 import {
     User as UserIcon,
@@ -102,6 +103,97 @@ const Users: React.FC = () => {
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
     };
+
+    // table columns memoized
+    const userColumns = useMemo(() => [
+        {
+            key: 'name',
+            header: 'Name',
+            cell: (user: User) => (
+                <div className="flex items-center gap-3">
+                    <div className="p-2 bg-slate-800 rounded-full">
+                        <UserIcon className="w-4 h-4 text-slate-400" />
+                    </div>
+                    <span className="font-medium text-slate-200">
+                        {user.first_name} {user.last_name}
+                    </span>
+                </div>
+            ),
+            sortable: true,
+            className: 'w-1/4'
+        },
+        {
+            key: 'email',
+            header: 'Email',
+            cell: (user: User) => (
+                <div className="flex items-center gap-2">
+                    <Mail className="w-4 h-4 text-slate-500" />
+                    {user.email}
+                </div>
+            ),
+            sortable: true,
+            className: 'w-1/4'
+        },
+        {
+            key: 'engagement',
+            header: 'Engagement',
+            cell: (user: User) => (
+                <div className="flex items-center gap-2">
+                    <div className="w-24 bg-slate-700 rounded-full h-2">
+                        <div
+                            className="bg-indigo-500 h-2 rounded-full"
+                            style={{ width: `${user.engagement_score || 0}%` }}
+                        />
+                    </div>
+                    <span className="text-xs">{user.engagement_score || 0}%</span>
+                </div>
+            ),
+            sortable: true,
+            className: 'w-1/6'
+        },
+        {
+            key: 'status',
+            header: 'Status',
+            cell: (user: User) => (
+                <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase border ${LEAD_STATUS_COLORS[user.lead_status as keyof typeof LEAD_STATUS_COLORS] || 'bg-slate-800 text-slate-400'}`}>
+                    {LEAD_STATUS_LABELS[user.lead_status as keyof typeof LEAD_STATUS_LABELS] || user.lead_status}
+                </span>
+            ),
+            sortable: true,
+            className: 'w-1/8'
+        },
+        {
+            key: 'ltv',
+            header: 'LTV',
+            cell: (user: User) => <span className="text-emerald-400">${(user.ltv || 0).toFixed(2)}</span>,
+            sortable: true,
+            className: 'w-1/8'
+        },
+        {
+            key: 'joined',
+            header: 'Joined',
+            cell: (user: User) => (
+                <div className="flex items-center gap-2">
+                    <Calendar className="w-4 h-4 text-slate-500" />
+                    {new Date(user.created_at).toLocaleDateString()}
+                </div>
+            ),
+            sortable: true,
+            className: 'w-1/6'
+        },
+        {
+            key: 'action',
+            header: 'Action',
+            cell: (user: User) => (
+                <Link
+                    to={`/users/${user.id}`}
+                    className="text-indigo-400 hover:text-indigo-300 font-medium"
+                >
+                    View Profile
+                </Link>
+            ),
+        }
+    ], []);
 
     return (
         <Layout title="Users">
@@ -228,81 +320,19 @@ const Users: React.FC = () => {
                         {/* Users Table */}
                         <Card>
                             <div className="overflow-x-auto">
-                                <table className="w-full text-left text-sm text-slate-400">
-                                    <thead className="bg-slate-900 text-slate-200 uppercase font-medium text-xs">
-                                        <tr>
-                                            <th className="px-6 py-3">User</th>
-                                            <th className="px-6 py-3">Email</th>
-                                            <th className="px-6 py-3">Engagement</th>
-                                            <th className="px-6 py-3">Status</th>
-                                            <th className="px-6 py-3">LTV</th>
-                                            <th className="px-6 py-3">Joined</th>
-                                            <th className="px-6 py-3">Action</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-800">
-                                        {isLoading ? (
-                                            <tr><td colSpan={6} className="px-6 py-4 text-center">Loading...</td></tr>
-                                        ) : filteredUsers.map((user) => (
-                                            <tr key={user.id} className="hover:bg-slate-800/50 transition-colors">
-                                                <td className="px-6 py-4">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className="p-2 bg-slate-800 rounded-full">
-                                                            <UserIcon className="w-4 h-4 text-slate-400" />
-                                                        </div>
-                                                        <span className="font-medium text-slate-200">
-                                                            {user.first_name} {user.last_name}
-                                                        </span>
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-4">
-                                                    <div className="flex items-center gap-2">
-                                                        <Mail className="w-4 h-4 text-slate-500" />
-                                                        {user.email}
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-4">
-                                                    <div className="flex items-center gap-2">
-                                                        <div className="w-24 bg-slate-700 rounded-full h-2">
-                                                            <div
-                                                                className="bg-indigo-500 h-2 rounded-full"
-                                                                style={{ width: `${user.engagement_score || 0}%` }}
-                                                            />
-                                                        </div>
-                                                        <span className="text-xs">{user.engagement_score || 0}%</span>
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-4">
-                                                    <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase border ${LEAD_STATUS_COLORS[user.lead_status as keyof typeof LEAD_STATUS_COLORS] || 'bg-slate-800 text-slate-400'}`}>
-                                                        {LEAD_STATUS_LABELS[user.lead_status as keyof typeof LEAD_STATUS_LABELS] || user.lead_status}
-                                                    </span>
-                                                </td>
-                                                <td className="px-6 py-4">
-                                                    <span className="text-emerald-400 font-medium">
-                                                        ${(user.ltv || 0).toFixed(2)}
-                                                    </span>
-                                                </td>
-                                                <td className="px-6 py-4">
-                                                    <div className="flex items-center gap-2">
-                                                        <Calendar className="w-4 h-4 text-slate-500" />
-                                                        {new Date(user.created_at).toLocaleDateString()}
-                                                    </div>
-                                                </td>
-                                                <td className="px-6 py-4">
-                                                    <Link
-                                                        to={`/users/${user.id}`}
-                                                        className="text-indigo-400 hover:text-indigo-300 font-medium"
-                                                    >
-                                                        View Profile
-                                                    </Link>
-                                                </td>
-                                            </tr>
-                                        ))}
-                                        {!isLoading && filteredUsers.length === 0 && (
-                                            <tr><td colSpan={6} className="px-6 py-8 text-center text-slate-500">No users found.</td></tr>
-                                        )}
-                                    </tbody>
-                                </table>
+                                <DataTable
+                                    data={filteredUsers}
+                                    columns={userColumns}
+                                    keyField="id"
+                                    page={1}
+                                    pageSize={filteredUsers.length || 1}
+                                    total={filteredUsers.length}
+                                    onPageChange={() => { }}
+                                    isLoading={isLoading}
+                                    virtualized
+                                    containerHeight={500}
+                                    emptyMessage="No users found."
+                                />
                             </div>
                         </Card>
                     </>

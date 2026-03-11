@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     SETTINGS_ENCRYPTION_KEY: str
 
+    # ── Default Admin ─────────────────────────────────────────────────────────
+    ADMIN_USERNAME: str = "admin"
+    ADMIN_PASSWORD: str = "admin123"
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Comma-separated list of allowed origins. Use "*" only in development.
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"

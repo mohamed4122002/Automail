@@ -17,6 +17,8 @@ interface AuthContextValue {
   login: (token: string) => void;
   logout: () => void;
   isAdmin: boolean;
+  isSuperAdmin: boolean;
+  isTeamMember: boolean;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -47,10 +49,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const login = (newToken: string) => setToken(newToken);
   const logout = () => setToken(null);
 
-  const isAdmin = user?.role === "admin" || (user?.roles || []).includes("admin");
+  const isAdmin = user?.role === "admin" ||
+    user?.role === "super_admin" ||
+    (user?.roles || []).some(r => ["admin", "super_admin"].includes(r));
+
+  const isSuperAdmin = user?.role === "super_admin" ||
+    (user?.roles || []).includes("super_admin");
+
+  const isTeamMember = !isAdmin && !!user;
 
   return (
-    <AuthContext.Provider value={{ token, user, loading, login, logout, isAdmin }}>
+    <AuthContext.Provider value={{ token, user, loading, login, logout, isAdmin, isSuperAdmin, isTeamMember }}>
       {children}
     </AuthContext.Provider>
   );

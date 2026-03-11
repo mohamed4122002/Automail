@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import {
     Table,
     TableBody,
@@ -19,6 +19,8 @@ import {
     ArrowDown
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+// virtualization utilities
+import { useVirtualizer } from '@tanstack/react-virtual';
 
 interface Column<T> {
     key: string;
@@ -32,34 +34,44 @@ interface DataTableProps<T> {
     data: T[];
     columns: Column<T>[];
     keyField: keyof T;
-    selection: Set<string>;
-    onToggleSelection: (id: string) => void;
-    onToggleAll: (ids: string[]) => void;
-    sortConfig: { key: string; direction: 'asc' | 'desc' };
-    onSort: (key: string) => void;
+    selection?: Set<string>;
+    onToggleSelection?: (id: string) => void;
+    onToggleAll?: (ids: string[]) => void;
+    sortConfig?: { key: string; direction: 'asc' | 'desc' };
+    onSort?: (key: string) => void;
     page: number;
     pageSize: number;
     total: number;
     onPageChange: (page: number) => void;
     isLoading?: boolean;
     emptyMessage?: React.ReactNode;
+    /**
+     * Enable virtualization for large data sets.  Requires installing
+     * @tanstack/react-virtual and supplying a container height.
+     */
+    virtualized?: boolean;
+    rowHeight?: number;
+    containerHeight?: number;
 }
 
 export function DataTable<T extends Record<string, any>>({
     data,
     columns,
     keyField,
-    selection,
-    onToggleSelection,
-    onToggleAll,
-    sortConfig,
-    onSort,
+    selection = new Set(),
+    onToggleSelection = () => { },
+    onToggleAll = () => { },
+    sortConfig = { key: '', direction: 'asc' },
+    onSort = () => { },
     page,
     pageSize,
     total,
     onPageChange,
     isLoading = false,
-    emptyMessage = "No data found"
+    emptyMessage = "No data found",
+    virtualized = false,
+    rowHeight = 48,
+    containerHeight = 400
 }: DataTableProps<T>) {
 
     const totalPages = Math.ceil(total / pageSize);
@@ -67,9 +79,55 @@ export function DataTable<T extends Record<string, any>>({
     const allSelected = data.length > 0 && allIds.every(id => selection.has(id));
     const someSelected = data.length > 0 && allIds.some(id => selection.has(id));
 
+    // virtualization setup (optional)
+    const parentRef = useRef<HTMLDivElement | null>(null);
+    const rowVirtualizer = useVirtualizer({
+        count: data.length,
+        getScrollElement: () => parentRef.current,
+        estimateSize: () => rowHeight || 48,
+        overscan: 5,
+    });
+    const virtualRows = rowVirtualizer.getVirtualItems();
+    const totalSize = rowVirtualizer.getTotalSize();
+
+    const MemoRow = React.memo(
+        ({ item, isSelected }: { item: any; isSelected: boolean }) => {
+            const id = String(item[keyField]);
+            return (
+                <TableRow
+                    key={id}
+                    className={cn(
+                        "border-slate-700/30 transition-colors hover:bg-slate-800/30 group",
+                        isSelected && "bg-indigo-500/5 hover:bg-indigo-500/10"
+                    )}
+                >
+                    <TableCell className="px-4">
+                        <Checkbox
+                            checked={isSelected}
+                            onCheckedChange={() => onToggleSelection(id)}
+                            className="border-slate-600 data-[state=checked]:bg-indigo-600 data-[state=checked]:border-indigo-600 opacity-50 group-hover:opacity-100 transition-opacity"
+                        />
+                    </TableCell>
+                    {columns.map((col) => (
+                        <TableCell key={col.key} className={cn("py-3", col.className)}>
+                            {col.cell(item)}
+                        </TableCell>
+                    ))}
+                </TableRow>
+            );
+        }
+    );
+
     return (
         <div className="space-y-4">
-            <div className="rounded-md border border-slate-700/50 overflow-hidden">
+            <div
+                ref={virtualized ? parentRef : null}
+                className={cn(
+                    "rounded-md border border-slate-700/50",
+                    virtualized ? "overflow-auto" : "overflow-hidden"
+                )}
+                style={virtualized ? { height: containerHeight || 400 } : undefined}
+            >
                 <Table>
                     <TableHeader className="bg-slate-800/50">
                         <TableRow className="hover:bg-transparent border-slate-700/50">
@@ -121,33 +179,31 @@ export function DataTable<T extends Record<string, any>>({
                                     {emptyMessage}
                                 </TableCell>
                             </TableRow>
+                        ) : virtualized ? (
+                            // Render using native table virtualization (spacer rows)
+                            <>
+                                {virtualRows.length > 0 && virtualRows[0].start > 0 && (
+                                    <tr>
+                                        <td style={{ height: virtualRows[0].start }} colSpan={columns.length + 1} />
+                                    </tr>
+                                )}
+                                {virtualRows.map(vr => {
+                                    const item = data[vr.index];
+                                    const isSelected = selection.has(String(item[keyField]));
+                                    return <MemoRow key={String(item[keyField])} item={item} isSelected={isSelected} />;
+                                })}
+                                {virtualRows.length > 0 && virtualRows[virtualRows.length - 1].end < totalSize && (
+                                    <tr>
+                                        <td style={{ height: totalSize - virtualRows[virtualRows.length - 1].end }} colSpan={columns.length + 1} />
+                                    </tr>
+                                )}
+                            </>
                         ) : (
                             data.map((item) => {
                                 const id = String(item[keyField]);
                                 const isSelected = selection.has(id);
 
-                                return (
-                                    <TableRow
-                                        key={id}
-                                        className={cn(
-                                            "border-slate-700/30 transition-colors hover:bg-slate-800/30 group",
-                                            isSelected && "bg-indigo-500/5 hover:bg-indigo-500/10"
-                                        )}
-                                    >
-                                        <TableCell className="px-4">
-                                            <Checkbox
-                                                checked={isSelected}
-                                                onCheckedChange={() => onToggleSelection(id)}
-                                                className="border-slate-600 data-[state=checked]:bg-indigo-600 data-[state=checked]:border-indigo-600 opacity-50 group-hover:opacity-100 transition-opacity"
-                                            />
-                                        </TableCell>
-                                        {columns.map((col) => (
-                                            <TableCell key={col.key} className={cn("py-3", col.className)}>
-                                                {col.cell(item)}
-                                            </TableCell>
-                                        ))}
-                                    </TableRow>
-                                );
+                                return <MemoRow key={id} item={item} isSelected={isSelected} />;
                             })
                         )}
                     </TableBody>

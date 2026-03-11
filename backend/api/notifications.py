@@ -22,6 +22,7 @@ async def mark_read(
     await NotificationService.mark_as_read(id)
     return {"status": "success"}
 
+@router.post("/mark-all-read")
 @router.post("/read-all")
 async def mark_all_read(
     current_user_id: UUID = Depends(get_current_user_id)

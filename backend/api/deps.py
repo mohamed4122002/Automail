@@ -44,3 +44,38 @@ async def get_current_user_id(
         raise credentials_exception
         
     return user.id
+
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme)
+) -> User:
+    """
+    Returns the full User object for role-based checks.
+    Use this when route logic needs to inspect user.role.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if not token:
+        raise credentials_exception
+    try:
+        payload = jwt.decode(
+            token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+        )
+        user_id_str: str = payload.get("sub")
+        if user_id_str is None:
+            raise credentials_exception
+        user_id = UUID(user_id_str)
+    except (JWTError, ValueError):
+        raise credentials_exception
+
+    user = await User.find_one(User.id == user_id, User.is_active == True)
+    if not user:
+        raise credentials_exception
+    return user
+
+
+ADMIN_ROLES = {"admin", "super_admin", "manager"}
+TEAM_MEMBER_ROLES = {"team_member", "sales"}

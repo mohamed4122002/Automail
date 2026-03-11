@@ -12,6 +12,43 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - platform_net
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27018:27017"
+    volumes:
+      - questioner_mongodb_data:/data/db
+    command: [ "--replSet", "rs0", "--bind_ip_all" ]
+    healthcheck:
+      test: >
+        mongosh --quiet --eval "
+          try {
+            let status = rs.status();
+            if (status.ok) {
+              let cfg = rs.conf();
+              if (cfg.members[0].host !== 'mongodb:27017') {
+                cfg.members[0].host = 'mongodb:27017';
+                rs.reconfig(cfg, {force: true});
+              }
+              quit(0);
+            }
+          } catch (e) {
+            rs.initiate({
+              _id: 'rs0',
+              members: [{ _id: 0, host: 'mongodb:27017' }]
+            });
+            quit(0);
+          }
+        "
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    networks:
+      - platform_net
     restart: unless-stopped
 
   backend:
@@ -22,8 +59,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      mongodb:
+        condition: service_healthy
     environment:
-      MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
+      MONGODB_URL: "mongodb://mongodb:27017/marketing_db?replicaSet=rs0"
       REDIS_URL: "redis://redis:6379/0"
       RUN_SEED: "1"
     env_file:
@@ -33,8 +72,7 @@ services:
     volumes:
       - .:/app
     networks:
-      - default
-      - shared_mongo_net
+      - platform_net
     restart: unless-stopped
 
   worker:
@@ -45,10 +83,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      mongodb:
+        condition: service_healthy
       backend:
         condition: service_started
     environment:
-      MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
+      MONGODB_URL: "mongodb://mongodb:27017/marketing_db?replicaSet=rs0"
       REDIS_URL: "redis://redis:6379/0"
       RUN_SEED: "0"
     env_file:
@@ -56,8 +96,7 @@ services:
     volumes:
       - .:/app
     networks:
-      - default
-      - shared_mongo_net
+      - platform_net
     restart: unless-stopped
 
   beat:
@@ -68,10 +107,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      mongodb:
+        condition: service_healthy
       backend:
         condition: service_started
     environment:
-      MONGODB_URL: "mongodb://questioner_mongodb:27017/marketing_db"
+      MONGODB_URL: "mongodb://mongodb:27017/marketing_db?replicaSet=rs0"
       REDIS_URL: "redis://redis:6379/0"
       RUN_SEED: "0"
     env_file:
@@ -79,8 +120,7 @@ services:
     volumes:
       - .:/app
     networks:
-      - default
-      - shared_mongo_net
+      - platform_net
     restart: unless-stopped
 
   frontend:
@@ -96,13 +136,15 @@ services:
       - /app/frontend/node_modules
     depends_on:
       - backend
+    networks:
+      - platform_net
     restart: unless-stopped
 
 networks:
-  default:
+  platform_net:
     driver: bridge
-  shared_mongo_net:
-    external: true
 
 volumes:
   redis_data:
+  questioner_mongodb_data:
+    external: true

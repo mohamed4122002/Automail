@@ -40,8 +40,15 @@ class PreviewResponse(BaseModel):
 async def list_templates(
     user_id: UUID = Depends(get_current_user_id)
 ):
-    """List all available email templates."""
-    return await EmailTemplate.find_all().to_list()
+    """List all available email templates.
+
+    We only need the ID, name and subject in the overview screen –
+    the HTML body is large and only required when editing a single
+    template.  Using a projection reduces document size and memory
+    pressure for large template collections.
+    """
+    # note: Beanie's `project` accepts field names or class attributes
+    return await EmailTemplate.find_all().project("_id", "name", "subject").to_list()
 
 @router.get("/{template_id}", response_model=TemplateResponse)
 async def get_template(

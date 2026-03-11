@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from .config import settings
-from .models import User
+from .models import User, UserRole
 
 
 pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
@@ -97,10 +97,23 @@ async def get_current_user_roles(
 async def get_current_admin(
     current_user: User = Depends(get_current_active_user),
 ) -> User:
-    if current_user.role != "admin" and "admin" not in current_user.roles:
+    # Check for admin or super_admin role
+    if current_user.role not in [UserRole.ADMIN, UserRole.SUPER_ADMIN] and \
+       not any(r in ["admin", "super_admin"] for r in current_user.roles):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",
+        )
+    return current_user
+
+
+async def get_current_super_admin(
+    current_user: User = Depends(get_current_active_user),
+) -> User:
+    if current_user.role != UserRole.SUPER_ADMIN and "super_admin" not in current_user.roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super Admin access required",
         )
     return current_user
 

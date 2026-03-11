@@ -91,37 +91,59 @@ class CampaignAnalyticsService:
         )
     
     async def _get_time_series(self, campaign_id: UUID, days: int) -> List[TimeSeriesDataPoint]:
-        """Get time series data for charts."""
+        """Get time series data for charts using MongoDB Aggregation."""
         start_date = datetime.utcnow() - timedelta(days=days)
         
-        sends = await EmailSend.find(
-            EmailSend.campaign_id == campaign_id,
-            EmailSend.created_at >= start_date
-        ).to_list()
+        # 1. Daily Sends Aggregation
+        send_pipeline = [
+            {"$match": {"campaign_id": campaign_id, "created_at": {"$gte": start_date}}},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
+                "count": {"$sum": 1}
+            }}
+        ]
+        sends_results = await EmailSend.get_motor_collection().aggregate(send_pipeline).to_list(length=None)
+        daily_sends = {r["_id"]: r["count"] for r in sends_results}
         
-        events = await Event.find(
-            Event.campaign_id == campaign_id,
-            Event.created_at >= start_date,
-            In(Event.type, [EventTypeEnum.OPENED, EventTypeEnum.CLICKED, EventTypeEnum.BOUNCED])
-        ).to_list()
+        # 2. Daily Unique Events Aggregation
+        event_pipeline = [
+            {"$match": {
+                "campaign_id": campaign_id,
+                "created_at": {"$gte": start_date},
+                "type": {"$in": [EventTypeEnum.OPENED.value, EventTypeEnum.CLICKED.value, EventTypeEnum.BOUNCED.value]}
+            }},
+            {"$group": {
+                "_id": {
+                    "date": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
+                    "type": "$type",
+                    "target": {"$cond": [{"$eq": ["$type", EventTypeEnum.BOUNCED.value]}, "$email_send_id", "$user_id"]}
+                }
+            }},
+            {"$group": {
+                "_id": {
+                    "date": "$_id.date",
+                    "type": "$_id.type"
+                },
+                "unique_count": {"$sum": 1}
+            }}
+        ]
         
-        daily_sends = defaultdict(int)
-        daily_opens = defaultdict(set)
-        daily_clicks = defaultdict(set)
-        daily_bounces = defaultdict(set)
+        events_results = await Event.get_motor_collection().aggregate(event_pipeline).to_list(length=None)
         
-        for s in sends:
-            date_str = str(s.created_at.date())
-            daily_sends[date_str] += 1
-            
-        for e in events:
-            date_str = str(e.created_at.date())
-            if e.type == EventTypeEnum.OPENED:
-                daily_opens[date_str].add(e.user_id)
-            elif e.type == EventTypeEnum.CLICKED:
-                daily_clicks[date_str].add(e.user_id)
-            elif e.type == EventTypeEnum.BOUNCED:
-                daily_bounces[date_str].add(e.email_send_id)
+        daily_opens = defaultdict(int)
+        daily_clicks = defaultdict(int)
+        daily_bounces = defaultdict(int)
+        
+        for r in events_results:
+            date_str = r["_id"]["date"]
+            type_str = r["_id"]["type"]
+            count = r["unique_count"]
+            if type_str == EventTypeEnum.OPENED.value:
+                daily_opens[date_str] = count
+            elif type_str == EventTypeEnum.CLICKED.value:
+                daily_clicks[date_str] = count
+            elif type_str == EventTypeEnum.BOUNCED.value:
+                daily_bounces[date_str] = count
                 
         time_series = []
         current_date = start_date.date()
@@ -132,11 +154,13 @@ class CampaignAnalyticsService:
             time_series.append(TimeSeriesDataPoint(
                 date=date_str,
                 sent=daily_sends.get(date_str, 0),
-                opened=len(daily_opens.get(date_str, set())),
-                clicked=len(daily_clicks.get(date_str, set())),
-                bounced=len(daily_bounces.get(date_str, set()))
+                opened=daily_opens.get(date_str, 0),
+                clicked=daily_clicks.get(date_str, 0),
+                bounced=daily_bounces.get(date_str, 0)
             ))
             current_date += timedelta(days=1)
+            
+        return time_series
             
         return time_series
     

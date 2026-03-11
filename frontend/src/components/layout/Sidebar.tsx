@@ -16,9 +16,17 @@ import {
   List,
   ChevronDown,
   BarChart2,
-  Megaphone
+  Megaphone,
+  Building2,
+  Star,
+  Inbox,
+  ShieldCheck,
+  Calendar,
+  Zap
 } from "lucide-react";
 
+import { useQuery } from "@tanstack/react-query";
+import api from "../../lib/api";
 import { useAuth } from "../../auth/AuthContext";
 
 interface SidebarProps {
@@ -28,7 +36,18 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
   const location = useLocation();
-  const { logout, isAdmin } = useAuth();
+  const { logout, isAdmin, isTeamMember } = useAuth();
+
+  const { data: actionCenterData } = useQuery({
+    queryKey: ['action-center-counts'],
+    queryFn: async () => {
+      const res = await api.get('/analytics/action-center');
+      return res.data;
+    },
+    refetchInterval: 30000, // Sync every 30s
+  });
+
+  const actionCount = actionCenterData?.counts?.total || 0;
 
   const isMarketingSection = location.pathname.startsWith('/campaigns') || location.pathname.startsWith('/workflows') || location.pathname.startsWith('/templates');
   const isLeadsSection = location.pathname.startsWith('/leads');
@@ -45,18 +64,33 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
     return false;
   };
 
+  // ── Team Member nav (simplified) ──────────────────
+  const teamMemberNav = [
+    { name: "Command Center", href: "/action-center", icon: Zap, badge: true },
+    { name: "My Dashboard", href: "/my-dashboard", icon: Star },
+    { name: "My Leads", href: "/leads/pipeline", icon: Users },
+    { name: "Lead Pool", href: "/leads/pool", icon: Inbox },
+    { name: "Calendar", href: "/calendar", icon: Calendar },
+    { name: "Settings", href: "/settings", icon: Settings },
+  ];
+
+  // ── Admin nav ──────────────────────────────────────
   const mainNav = [
+    { name: "Command Center", href: "/action-center", icon: Zap, badge: true },
     { name: "Dashboard", href: "/", icon: LayoutDashboard },
     { name: "Settings", href: "/settings", icon: Settings },
   ];
 
   if (isAdmin) {
     mainNav.push({ name: "Admin Portal", href: "/admin", icon: Users });
+    mainNav.push({ name: "Permissions", href: "/admin/permissions", icon: ShieldCheck });
   }
 
   const leadsSubNav = [
     { name: "Pipeline Board", href: "/leads/pipeline", icon: LayoutGrid },
     { name: "Lead Directory", href: "/leads/list", icon: List },
+    { name: "Lead Pool", href: "/leads/pool", icon: Inbox },
+    { name: "Organizations", href: "/organizations", icon: Building2 },
   ];
 
   const marketingSubNav = [
@@ -104,205 +138,252 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
 
         <nav className="flex flex-col h-[calc(100vh-4rem)] p-4 space-y-1 overflow-y-auto">
           <div className="flex-1 space-y-0.5">
-            {/* Top-level item: Dashboard */}
-            {mainNav.slice(0, 1).map((item) => {
-              const active = isActive(item.href);
-              return (
-                <Link
-                  key={item.name}
-                  to={item.href}
-                  className={classNames(
-                    "flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-colors group mb-2",
-                    active
-                      ? "bg-indigo-500/10 text-indigo-400"
-                      : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                  )}
-                >
-                  <item.icon
+            {/* ── Team Member: Simplified Nav ── */}
+            {isTeamMember && (
+              <div className="space-y-0.5">
+                <p className="text-[9px] font-black text-slate-600 uppercase tracking-[0.2em] px-3 pb-2">My Workspace</p>
+                {teamMemberNav.map((item) => {
+                  const active = location.pathname === item.href;
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={classNames(
+                        "flex items-center px-3 py-2.5 text-sm font-semibold rounded-lg transition-colors group",
+                        active
+                          ? "bg-indigo-500/10 text-indigo-400"
+                          : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                      )}
+                    >
+                      <item.icon className={classNames(
+                        "w-5 h-5 mr-3 flex-shrink-0",
+                        active ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
+                      )} />
+                      <span className="flex-1">{item.name}</span>
+                      {item.badge && actionCount > 0 && (
+                        <span className="flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-rose-500 text-[10px] font-black text-white shadow-lg shadow-rose-500/20">
+                          {actionCount}
+                        </span>
+                      )}
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* ── Admin / Manager: Full Nav ── */}
+            {!isTeamMember && (
+              <>
+                {/* Top-level item: Dashboard */}
+                {mainNav.slice(0, 1).map((item) => {
+                  const active = isActive(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={classNames(
+                        "flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-colors group mb-2",
+                        active
+                          ? "bg-indigo-500/10 text-indigo-400"
+                          : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                      )}
+                    >
+                      <item.icon
+                        className={classNames(
+                          "w-5 h-5 mr-3 flex-shrink-0",
+                          active ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
+                        )}
+                      />
+                      <span className="flex-1">{item.name}</span>
+                      {item.badge && actionCount > 0 && (
+                        <span className="flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-rose-500 text-[10px] font-black text-white shadow-lg shadow-rose-500/20">
+                          {actionCount}
+                        </span>
+                      )}
+                    </Link>
+                  );
+                })}
+
+                {/* ── Marketing Accordion ── */}
+                <div>
+                  <button
+                    onClick={() => setMarketingOpen(prev => !prev)}
                     className={classNames(
-                      "w-5 h-5 mr-3 flex-shrink-0",
-                      active ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
+                      "flex items-center w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors group",
+                      isMarketingSection
+                        ? "bg-indigo-500/10 text-indigo-400"
+                        : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
                     )}
-                  />
-                  {item.name}
-                </Link>
-              );
-            })}
+                  >
+                    <Megaphone className={classNames(
+                      "w-5 h-5 mr-3 flex-shrink-0",
+                      isMarketingSection ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
+                    )} />
+                    <span className="flex-1 text-left">Marketing</span>
+                    <ChevronDown className={classNames(
+                      "w-4 h-4 flex-shrink-0 transition-transform duration-200",
+                      marketingOpen ? "rotate-180" : "",
+                      isMarketingSection ? "text-indigo-400" : "text-slate-600"
+                    )} />
+                  </button>
 
-            {/* ── Marketing Accordion ── */}
-            <div>
-              <button
-                onClick={() => setMarketingOpen(prev => !prev)}
-                className={classNames(
-                  "flex items-center w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors group",
-                  isMarketingSection
-                    ? "bg-indigo-500/10 text-indigo-400"
-                    : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                )}
-              >
-                <Megaphone className={classNames(
-                  "w-5 h-5 mr-3 flex-shrink-0",
-                  isMarketingSection ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
-                )} />
-                <span className="flex-1 text-left">Marketing</span>
-                <ChevronDown className={classNames(
-                  "w-4 h-4 flex-shrink-0 transition-transform duration-200",
-                  marketingOpen ? "rotate-180" : "",
-                  isMarketingSection ? "text-indigo-400" : "text-slate-600"
-                )} />
-              </button>
-
-              {marketingOpen && (
-                <div className="ml-8 mt-0.5 space-y-0.5 border-l border-slate-800 pl-3">
-                  {marketingSubNav.map((item) => {
-                    const active = isActive(item.href);
-                    return (
-                      <Link
-                        key={item.name}
-                        to={item.href}
-                        className={classNames(
-                          "flex items-center px-3 py-2 text-xs font-semibold rounded-lg transition-colors group",
-                          active
-                            ? "bg-indigo-500/10 text-indigo-400"
-                            : "text-slate-500 hover:bg-slate-800 hover:text-slate-100"
-                        )}
-                      >
-                        <item.icon className={classNames(
-                          "w-4 h-4 mr-2.5 flex-shrink-0",
-                          active ? "text-indigo-400" : "text-slate-600 group-hover:text-slate-400"
-                        )} />
-                        {item.name}
-                      </Link>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* ── Leads Accordion ── */}
-            <div>
-              <button
-                onClick={() => setLeadsOpen(prev => !prev)}
-                className={classNames(
-                  "flex items-center w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors group mt-0.5",
-                  isLeadsSection
-                    ? "bg-indigo-500/10 text-indigo-400"
-                    : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                )}
-              >
-                <Users className={classNames(
-                  "w-5 h-5 mr-3 flex-shrink-0",
-                  isLeadsSection ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
-                )} />
-                <span className="flex-1 text-left">CRM / Leads</span>
-                <ChevronDown className={classNames(
-                  "w-4 h-4 flex-shrink-0 transition-transform duration-200",
-                  leadsOpen ? "rotate-180" : "",
-                  isLeadsSection ? "text-indigo-400" : "text-slate-600"
-                )} />
-              </button>
-
-              {leadsOpen && (
-                <div className="ml-8 mt-0.5 space-y-0.5 border-l border-slate-800 pl-3">
-                  {leadsSubNav.map((item) => {
-                    const active = isActive(item.href);
-                    return (
-                      <Link
-                        key={item.name}
-                        to={item.href}
-                        className={classNames(
-                          "flex items-center px-3 py-2 text-xs font-semibold rounded-lg transition-colors group",
-                          active
-                            ? "bg-indigo-500/10 text-indigo-400"
-                            : "text-slate-500 hover:bg-slate-800 hover:text-slate-100"
-                        )}
-                      >
-                        <item.icon className={classNames(
-                          "w-4 h-4 mr-2.5 flex-shrink-0",
-                          active ? "text-indigo-400" : "text-slate-600 group-hover:text-slate-400"
-                        )} />
-                        {item.name}
-                      </Link>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* ── Analytics Accordion ── */}
-            <div>
-              <button
-                onClick={() => setAnalyticsOpen(prev => !prev)}
-                className={classNames(
-                  "flex items-center w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors group mt-0.5",
-                  isAnalyticsSection
-                    ? "bg-indigo-500/10 text-indigo-400"
-                    : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                )}
-              >
-                <BarChart2 className={classNames(
-                  "w-5 h-5 mr-3 flex-shrink-0",
-                  isAnalyticsSection ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
-                )} />
-                <span className="flex-1 text-left">Analytics</span>
-                <ChevronDown className={classNames(
-                  "w-4 h-4 flex-shrink-0 transition-transform duration-200",
-                  analyticsOpen ? "rotate-180" : "",
-                  isAnalyticsSection ? "text-indigo-400" : "text-slate-600"
-                )} />
-              </button>
-
-              {analyticsOpen && (
-                <div className="ml-8 mt-0.5 space-y-0.5 border-l border-slate-800 pl-3 mb-0.5">
-                  {analyticsSubNav.map((item) => {
-                    const active = isActive(item.href);
-                    return (
-                      <Link
-                        key={item.name}
-                        to={item.href}
-                        className={classNames(
-                          "flex items-center px-3 py-2 text-xs font-semibold rounded-lg transition-colors group",
-                          active
-                            ? "bg-indigo-500/10 text-indigo-400"
-                            : "text-slate-500 hover:bg-slate-800 hover:text-slate-100"
-                        )}
-                      >
-                        <item.icon className={classNames(
-                          "w-4 h-4 mr-2.5 flex-shrink-0",
-                          active ? "text-indigo-400" : "text-slate-600 group-hover:text-slate-400"
-                        )} />
-                        {item.name}
-                      </Link>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {mainNav.slice(1).map((item) => {
-
-              const active = isActive(item.href);
-              return (
-                <Link
-                  key={item.name}
-                  to={item.href}
-                  className={classNames(
-                    "flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-colors group mt-0.5",
-                    active
-                      ? "bg-indigo-500/10 text-indigo-400"
-                      : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                  {marketingOpen && (
+                    <div className="ml-8 mt-0.5 space-y-0.5 border-l border-slate-800 pl-3">
+                      {marketingSubNav.map((item) => {
+                        const active = isActive(item.href);
+                        return (
+                          <Link
+                            key={item.name}
+                            to={item.href}
+                            className={classNames(
+                              "flex items-center px-3 py-2 text-xs font-semibold rounded-lg transition-colors group",
+                              active
+                                ? "bg-indigo-500/10 text-indigo-400"
+                                : "text-slate-500 hover:bg-slate-800 hover:text-slate-100"
+                            )}
+                          >
+                            <item.icon className={classNames(
+                              "w-4 h-4 mr-2.5 flex-shrink-0",
+                              active ? "text-indigo-400" : "text-slate-600 group-hover:text-slate-400"
+                            )} />
+                            {item.name}
+                          </Link>
+                        );
+                      })}
+                    </div>
                   )}
-                >
-                  <item.icon
+                </div>
+
+                {/* ── Leads Accordion ── */}
+                <div>
+                  <button
+                    onClick={() => setLeadsOpen(prev => !prev)}
                     className={classNames(
-                      "w-5 h-5 mr-3 flex-shrink-0",
-                      active ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
+                      "flex items-center w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors group mt-0.5",
+                      isLeadsSection
+                        ? "bg-indigo-500/10 text-indigo-400"
+                        : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
                     )}
-                  />
-                  {item.name}
-                </Link>
-              );
-            })}
+                  >
+                    <Users className={classNames(
+                      "w-5 h-5 mr-3 flex-shrink-0",
+                      isLeadsSection ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
+                    )} />
+                    <span className="flex-1 text-left">CRM / Leads</span>
+                    <ChevronDown className={classNames(
+                      "w-4 h-4 flex-shrink-0 transition-transform duration-200",
+                      leadsOpen ? "rotate-180" : "",
+                      isLeadsSection ? "text-indigo-400" : "text-slate-600"
+                    )} />
+                  </button>
+
+                  {leadsOpen && (
+                    <div className="ml-8 mt-0.5 space-y-0.5 border-l border-slate-800 pl-3">
+                      {leadsSubNav.map((item) => {
+                        const active = isActive(item.href);
+                        return (
+                          <Link
+                            key={item.name}
+                            to={item.href}
+                            className={classNames(
+                              "flex items-center px-3 py-2 text-xs font-semibold rounded-lg transition-colors group",
+                              active
+                                ? "bg-indigo-500/10 text-indigo-400"
+                                : "text-slate-500 hover:bg-slate-800 hover:text-slate-100"
+                            )}
+                          >
+                            <item.icon className={classNames(
+                              "w-4 h-4 mr-2.5 flex-shrink-0",
+                              active ? "text-indigo-400" : "text-slate-600 group-hover:text-slate-400"
+                            )} />
+                            {item.name}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Analytics Accordion ── */}
+                <div>
+                  <button
+                    onClick={() => setAnalyticsOpen(prev => !prev)}
+                    className={classNames(
+                      "flex items-center w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors group mt-0.5",
+                      isAnalyticsSection
+                        ? "bg-indigo-500/10 text-indigo-400"
+                        : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                    )}
+                  >
+                    <BarChart2 className={classNames(
+                      "w-5 h-5 mr-3 flex-shrink-0",
+                      isAnalyticsSection ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
+                    )} />
+                    <span className="flex-1 text-left">Analytics</span>
+                    <ChevronDown className={classNames(
+                      "w-4 h-4 flex-shrink-0 transition-transform duration-200",
+                      analyticsOpen ? "rotate-180" : "",
+                      isAnalyticsSection ? "text-indigo-400" : "text-slate-600"
+                    )} />
+                  </button>
+
+                  {analyticsOpen && (
+                    <div className="ml-8 mt-0.5 space-y-0.5 border-l border-slate-800 pl-3 mb-0.5">
+                      {analyticsSubNav.map((item) => {
+                        const active = isActive(item.href);
+                        return (
+                          <Link
+                            key={item.name}
+                            to={item.href}
+                            className={classNames(
+                              "flex items-center px-3 py-2 text-xs font-semibold rounded-lg transition-colors group",
+                              active
+                                ? "bg-indigo-500/10 text-indigo-400"
+                                : "text-slate-500 hover:bg-slate-800 hover:text-slate-100"
+                            )}
+                          >
+                            <item.icon className={classNames(
+                              "w-4 h-4 mr-2.5 flex-shrink-0",
+                              active ? "text-indigo-400" : "text-slate-600 group-hover:text-slate-400"
+                            )} />
+                            {item.name}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {mainNav.slice(1).map((item) => {
+                  const active = isActive(item.href);
+                  return (
+                    <Link
+                      key={item.name}
+                      to={item.href}
+                      className={classNames(
+                        "flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-colors group mt-0.5",
+                        active
+                          ? "bg-indigo-500/10 text-indigo-400"
+                          : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                      )}
+                    >
+                      <item.icon
+                        className={classNames(
+                          "w-5 h-5 mr-3 flex-shrink-0",
+                          active ? "text-indigo-400" : "text-slate-500 group-hover:text-slate-300"
+                        )}
+                      />
+                      <span className="flex-1">{item.name}</span>
+                      {item.badge && actionCount > 0 && (
+                        <span className="flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-rose-500 text-[10px] font-black text-white shadow-lg shadow-rose-500/20">
+                          {actionCount}
+                        </span>
+                      )}
+                    </Link>
+                  );
+                })}
+              </>
+            )}
           </div>
 
           <div className="pt-4 border-t border-slate-800">

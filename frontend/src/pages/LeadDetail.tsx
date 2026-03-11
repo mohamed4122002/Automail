@@ -4,11 +4,13 @@ import Layout from "../components/layout/Layout";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
-import { ArrowLeft, Mail, Clock, Calendar, MessageSquare, Flame, TrendingUp, Snowflake, Zap, XCircle, UserPlus, CheckCircle2, Activity, Users, Phone, List as ListIcon, PlusCircle, Trash2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Mail, Clock, Calendar, MessageSquare, Flame, TrendingUp, Snowflake, Zap, XCircle, UserPlus, CheckCircle2, Activity, Users, Phone, List as ListIcon, PlusCircle, Trash2, Building2, StickyNote, AlertTriangle } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api from "../lib/api";
 import { toast } from "sonner";
-import { useWebSocket } from "../hooks/useWebSocket";
+import { cn } from "../lib/utils";
+
+import { useGlobalWebSocket } from "../context/WebSocketContext";
 
 const CRM_STAGES = [
     { id: 'lead', name: 'Lead', color: 'bg-slate-500' },
@@ -30,6 +32,7 @@ const LeadDetail: React.FC = () => {
     // Interaction form state
     const [interactionType, setInteractionType] = useState<"call" | "meeting" | "note">("note");
     const [interactionContent, setInteractionContent] = useState("");
+    const [filterType, setFilterType] = useState<string | null>(null);
 
     // Task form state
     const [isAddTaskOpen, setIsAddTaskOpen] = useState(false);
@@ -40,6 +43,7 @@ const LeadDetail: React.FC = () => {
         start_time: "",
         end_time: "",
     });
+    const [meetingDuration, setMeetingDuration] = useState("60"); // default 60 mins
     const [newTask, setNewTask] = useState({
         title: "",
         description: "",
@@ -48,8 +52,11 @@ const LeadDetail: React.FC = () => {
     });
 
     // WebSocket for real-time sync
-    useWebSocket(`ws://${window.location.host}/api/ws/dashboard`, {
-        onMessage: (message) => {
+    const { lastMessage } = useGlobalWebSocket();
+
+    React.useEffect(() => {
+        if (lastMessage !== null) {
+            const message = JSON.parse(lastMessage.data);
             if (message.type === 'crm_event' || message.type === 'event') {
                 // Determine if this event is relevant to THIS lead
                 const isRelevant = !message.entity_id || message.entity_id === id;
@@ -87,7 +94,15 @@ const LeadDetail: React.FC = () => {
     const { data: users } = useQuery({
         queryKey: ['users'],
         queryFn: async () => {
-            const res = await api.get('/api/admin/users'); // Use admin API for team member list
+            const res = await api.get('/admin/users');
+            return res.data;
+        }
+    });
+
+    const { data: integrationStatus } = useQuery({
+        queryKey: ['integration-status'],
+        queryFn: async () => {
+            const res = await api.get('/integrations/status');
             return res.data;
         }
     });
@@ -101,6 +116,8 @@ const LeadDetail: React.FC = () => {
         lead_score: 0,
         assigned_to_id: "" as string | null,
         proposal_deadline: "" as string | null,
+        deal_value: 0,
+        deal_currency: "USD",
     });
 
     React.useEffect(() => {
@@ -113,6 +130,8 @@ const LeadDetail: React.FC = () => {
                 lead_score: lead.lead_score || 0,
                 assigned_to_id: lead.assigned_to_id || null,
                 proposal_deadline: lead.proposal_deadline ? new Date(lead.proposal_deadline).toISOString().split('T')[0] : null,
+                deal_value: lead.deal_value || 0,
+                deal_currency: lead.deal_currency || "USD",
             });
         }
     }, [lead]);
@@ -130,14 +149,45 @@ const LeadDetail: React.FC = () => {
         }
     });
 
+    React.useEffect(() => {
+        if (meetingForm.start_time && meetingDuration) {
+            const start = new Date(meetingForm.start_time);
+            const end = new Date(start.getTime() + parseInt(meetingDuration) * 60000);
+
+            // Format back to YYYY-MM-DDTHH:MM
+            const endStr = end.getFullYear() + '-' +
+                String(end.getMonth() + 1).padStart(2, '0') + '-' +
+                String(end.getDate()).padStart(2, '0') + 'T' +
+                String(end.getHours()).padStart(2, '0') + ':' +
+                String(end.getMinutes()).padStart(2, '0');
+
+            setMeetingForm(prev => ({ ...prev, end_time: endStr }));
+        }
+    }, [meetingForm.start_time, meetingDuration]);
+
     const updateLeadMutation = useMutation({
         mutationFn: async (data: typeof editForm) => {
-            return await api.patch(`/leads/${id}`, data);
+            // Sanitize data
+            const payload: any = { ...data };
+
+            // Remove auto-calculated/readonly fields
+            delete payload.lead_score;
+
+            // Handle empty strings for optional dates/UUIDs
+            if (!payload.proposal_deadline) payload.proposal_deadline = null;
+            if (!payload.assigned_to_id) payload.assigned_to_id = null;
+
+            return await api.patch(`/leads/${id}`, payload);
         },
         onSuccess: () => {
             setIsEditModalOpen(false);
+            toast.success("Lead profile updated successfully.");
             queryClient.invalidateQueries({ queryKey: ['lead', id] });
             queryClient.invalidateQueries({ queryKey: ['lead-activity', id] });
+        },
+        onError: (error: any) => {
+            const msg = error?.response?.data?.detail || "Failed to update lead profile. Please check your connection.";
+            toast.error(msg);
         }
     });
 
@@ -206,15 +256,30 @@ const LeadDetail: React.FC = () => {
         onSuccess: () => {
             setIsMeetingModalOpen(false);
             setMeetingForm({ summary: "", description: "", start_time: "", end_time: "" });
-            toast.success("Meeting booked successfully!");
+            toast.success("Meeting booked! A calendar invite has been sent to the lead.");
             queryClient.invalidateQueries({ queryKey: ['lead-activity', id] });
+            queryClient.invalidateQueries({ queryKey: ['lead', id] });
             queryClient.invalidateQueries({ queryKey: ['dashboard'] });
             queryClient.invalidateQueries({ queryKey: ['lead-stats'] });
         },
-        onError: () => {
-            toast.error("Failed to book meeting. Ensure Google Calendar is connected in Settings.");
+        onError: (error: any) => {
+            const msg = error?.response?.data?.detail || "Failed to book meeting. Ensure Google Calendar is connected in Settings.";
+            toast.error(msg);
         }
     });
+
+    const updateStageMutation = useMutation({
+        mutationFn: async (stage: string) => {
+            return await api.patch(`/leads/${id}/stage`, { stage });
+        },
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['lead', id] });
+            queryClient.invalidateQueries({ queryKey: ['lead-activity', id] });
+            queryClient.invalidateQueries({ queryKey: ['lead-stats'] });
+            queryClient.invalidateQueries({ queryKey: ['pipeline-summary'] });
+        }
+    });
+
 
     if (leadLoading) return <Layout><div className="p-8 text-center text-slate-400">Loading profile...</div></Layout>;
     if (!lead) return <Layout><div className="p-8 text-center text-red-400">Lead not found</div></Layout>;
@@ -242,6 +307,54 @@ const LeadDetail: React.FC = () => {
 
     return (
         <Layout title="Lead Profile">
+            {/* Connection Banner */}
+            {integrationStatus?.google_calendar?.connected === false && (
+                <div className="bg-amber-500/10 border-b border-amber-500/20 px-8 py-3 flex items-center justify-between group">
+                    <div className="flex items-center gap-3">
+                        <AlertTriangle className="w-4 h-4 text-amber-500 animate-pulse" />
+                        <p className="text-xs font-bold text-amber-200/80 tracking-tight">
+                            Google Calendar is not connected. Connect now to enable one-click meeting booking.
+                        </p>
+                    </div>
+                    <Link
+                        to="/settings"
+                        className="text-[10px] font-black text-amber-500 uppercase tracking-[0.2em] hover:text-amber-400 transition-colors flex items-center gap-2"
+                    >
+                        Connect Account
+                        <ArrowRight className="w-3 h-3 group-hover:translate-x-1 transition-transform" />
+                    </Link>
+                </div>
+            )}
+
+            {/* Inline Stage Pills Header */}
+            <div className="bg-slate-900/80 backdrop-blur-md border-b border-slate-800 px-8 py-4 sticky top-0 z-30 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
+                    {CRM_STAGES.map((s) => {
+                        const isActive = lead.stage === s.id;
+                        return (
+                            <button
+                                key={s.id}
+                                onClick={() => updateStageMutation.mutate(s.id)}
+                                disabled={isActive || updateStageMutation.isPending}
+                                className={cn(
+                                    "px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all flex-shrink-0 flex items-center gap-2",
+                                    isActive
+                                        ? "bg-indigo-500 border-indigo-400 text-white shadow-lg shadow-indigo-500/20"
+                                        : "bg-slate-950/40 border-slate-800 text-slate-500 hover:text-slate-300 hover:border-slate-700",
+                                    (updateStageMutation.isPending && !isActive) ? "opacity-60 cursor-not-allowed" : ""
+                                )}
+                            >
+                                {isActive && <CheckCircle2 className="w-3 h-3" />}
+                                {s.name}
+                            </button>
+                        );
+                    })}
+                </div>
+                <div className="hidden md:flex items-center gap-2 text-slate-500 text-[10px] font-black uppercase tracking-widest">
+                    <Activity className="w-3 h-3 text-indigo-500" />
+                    Pipeline Status
+                </div>
+            </div>
             {isMeetingModalOpen && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 overflow-y-auto">
                     <Card className="w-full max-w-lg bg-slate-900 border-2 border-slate-800 shadow-2xl rounded-3xl">
@@ -269,14 +382,27 @@ const LeadDetail: React.FC = () => {
                                     />
                                 </div>
                                 <div>
-                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">End Time (Optional)</label>
-                                    <input
-                                        type="datetime-local"
-                                        className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-slate-300 focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all font-semibold"
-                                        value={meetingForm.end_time}
-                                        onChange={e => setMeetingForm({ ...meetingForm, end_time: e.target.value })}
-                                    />
+                                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Duration</label>
+                                    <select
+                                        className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-slate-300 focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all font-semibold appearance-none"
+                                        value={meetingDuration}
+                                        onChange={e => setMeetingDuration(e.target.value)}
+                                    >
+                                        <option value="30">30 Minutes</option>
+                                        <option value="60">1 Hour</option>
+                                        <option value="90">1.5 Hours</option>
+                                        <option value="120">2 Hours</option>
+                                    </select>
                                 </div>
+                            </div>
+                            <div>
+                                <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">End Time (Calculated)</label>
+                                <input
+                                    type="datetime-local"
+                                    className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-slate-500 bg-slate-900/50 cursor-not-allowed opacity-60 outline-none font-semibold"
+                                    value={meetingForm.end_time}
+                                    readOnly
+                                />
                             </div>
                             <div>
                                 <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Description</label>
@@ -330,12 +456,24 @@ const LeadDetail: React.FC = () => {
                                     </div>
                                     <div>
                                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Source</label>
-                                        <input
-                                            type="text"
-                                            className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-slate-300 focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all font-semibold"
+                                        <select
+                                            className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-slate-300 focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all font-semibold appearance-none"
                                             value={editForm.source}
                                             onChange={e => setEditForm({ ...editForm, source: e.target.value })}
-                                        />
+                                        >
+                                            <option value="Marketing">Marketing</option>
+                                            <option value="Referral">Referral</option>
+                                            <option value="Cold Outreach">Cold Outreach</option>
+                                            <option value="Inbound">Inbound</option>
+                                            <option value="Website Form">Website Form</option>
+                                            <option value="Organic Search">Organic Search</option>
+                                            <option value="Social Media">Social Media</option>
+                                            <option value="Conference">Conference</option>
+                                            <option value="Other">Other</option>
+                                            {!['Marketing', 'Referral', 'Cold Outreach', 'Inbound', 'Website Form', 'Organic Search', 'Social Media', 'Conference', 'Other'].includes(editForm.source) && (
+                                                <option value={editForm.source}>{editForm.source}</option>
+                                            )}
+                                        </select>
                                     </div>
                                     <div>
                                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Assigned To</label>
@@ -391,14 +529,52 @@ const LeadDetail: React.FC = () => {
                                             onChange={e => setEditForm({ ...editForm, proposal_deadline: e.target.value })}
                                         />
                                     </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Currency</label>
+                                            <select
+                                                className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-slate-300 focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all font-semibold appearance-none"
+                                                value={editForm.deal_currency}
+                                                onChange={e => setEditForm({ ...editForm, deal_currency: e.target.value })}
+                                            >
+                                                <option value="USD">USD</option>
+                                                <option value="EGP">EGP</option>
+                                                <option value="EUR">EUR</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Value</label>
+                                            <input
+                                                type="number"
+                                                className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-slate-300 focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all font-semibold"
+                                                value={editForm.deal_value}
+                                                onChange={e => setEditForm({ ...editForm, deal_value: Number(e.target.value) })}
+                                                placeholder="0"
+                                            />
+                                        </div>
+                                    </div>
                                     <div>
-                                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Score</label>
-                                        <input
-                                            type="number"
-                                            className="w-full bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4 text-sm text-slate-300 focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all font-semibold"
-                                            value={editForm.lead_score}
-                                            onChange={e => setEditForm({ ...editForm, lead_score: parseInt(e.target.value) || 0 })}
-                                        />
+                                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 block">Engagement Score <span className="text-indigo-400">(Auto-calculated)</span></label>
+                                        <div className="flex items-center gap-4 bg-slate-950 border border-slate-800 rounded-2xl px-5 py-4">
+                                            <div className="flex-1 bg-slate-800 h-2 rounded-full overflow-hidden">
+                                                <div
+                                                    className={cn(
+                                                        "h-full rounded-full transition-all duration-700",
+                                                        (lead?.lead_score || 0) > 70 ? "bg-emerald-500" :
+                                                            (lead?.lead_score || 0) > 40 ? "bg-amber-500" : "bg-rose-500"
+                                                    )}
+                                                    style={{ width: `${lead?.lead_score || 0}%` }}
+                                                />
+                                            </div>
+                                            <span className={cn(
+                                                "text-lg font-black italic min-w-[2.5rem] text-right",
+                                                (lead?.lead_score || 0) > 70 ? "text-emerald-400" :
+                                                    (lead?.lead_score || 0) > 40 ? "text-amber-400" : "text-rose-400"
+                                            )}>
+                                                {lead?.lead_score || 0}
+                                            </span>
+                                        </div>
+                                        <p className="text-[10px] text-slate-600 mt-1.5 font-bold">Score updates automatically when you log calls, emails, and meetings.</p>
                                     </div>
                                 </div>
                             </div>
@@ -511,28 +687,49 @@ const LeadDetail: React.FC = () => {
                             </div>
 
                             <div className="w-full space-y-4 border-t border-slate-800/60 pt-6">
+                                {lead.proposal_deadline && (
+                                    <div className="flex items-center text-sm font-medium text-rose-400 font-bold italic">
+                                        <Clock className="w-4 h-4 mr-3" />
+                                        <span className="uppercase text-[10px] font-black mr-2">Deadline:</span>
+                                        {new Date(lead.proposal_deadline).toLocaleDateString()}
+                                    </div>
+                                )}
                                 <div className="flex items-center text-sm font-medium text-slate-300">
                                     <Activity className="w-4 h-4 mr-3 text-slate-500" />
                                     <span className="text-slate-500 mr-2 uppercase text-[10px] font-black">Status:</span>
                                     {lead.lead_status}
                                 </div>
                                 <div className="flex items-center text-sm font-medium text-slate-300">
+                                    <UserPlus className="w-4 h-4 mr-3 text-slate-500" />
+                                    <span className="text-slate-500 mr-2 uppercase text-[10px] font-black">Assignee:</span>
+                                    {lead.assigned_to_name || 'Unassigned'}
+                                </div>
+                                <div className="flex items-center text-sm font-medium text-slate-300">
                                     <Calendar className="w-4 h-4 mr-3 text-slate-500" />
                                     <span className="text-slate-500 mr-2 uppercase text-[10px] font-black">Created:</span>
                                     {new Date(lead.created_at).toLocaleDateString()}
                                 </div>
-                                {lead.proposal_deadline && (
-                                    <div className="flex items-center text-sm font-medium text-rose-400 font-bold italic">
-                                        <TrendingUp className="w-4 h-4 mr-3" />
-                                        <span className="uppercase text-[10px] font-black mr-2">Deadline:</span>
-                                        {new Date(lead.proposal_deadline).toLocaleDateString()}
+                                {lead.organization_id && (
+                                    <div className="pt-4 mt-2 border-t border-slate-800/40">
+                                        <div className="mb-4">
+                                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Potential Deal Value</label>
+                                            <div className="text-xl font-black text-indigo-400 italic">
+                                                {lead.deal_currency || 'USD'} {Number(lead.deal_value || 0).toLocaleString()}
+                                            </div>
+                                        </div>
+                                        <Link
+                                            to={`/organizations/${lead.organization_id}`}
+                                            className="group flex items-center p-3 rounded-xl bg-indigo-500/5 border border-indigo-500/10 hover:bg-indigo-500/10 hover:border-indigo-500/30 transition-all"
+                                        >
+                                            <Building2 className="w-4 h-4 mr-3 text-indigo-400" />
+                                            <div className="flex-1 min-w-0">
+                                                <span className="block text-[8px] font-black text-slate-600 uppercase tracking-widest">Organization</span>
+                                                <span className="block text-xs font-bold text-slate-200 truncate group-hover:text-indigo-400 transition-colors">View Company Details</span>
+                                            </div>
+                                            <ArrowRight className="w-3 h-3 text-slate-600 group-hover:text-indigo-400 group-hover:translate-x-0.5 transition-all" />
+                                        </Link>
                                     </div>
                                 )}
-                                <div className="flex items-center text-sm font-medium text-slate-300">
-                                    <CheckCircle2 className="w-4 h-4 mr-3 text-slate-500" />
-                                    <span className="text-slate-500 mr-2 uppercase text-[10px] font-black">Assigned:</span>
-                                    {lead.assigned_to_name || 'Unassigned'}
-                                </div>
                             </div>
 
                             <div className="w-full mt-8 grid grid-cols-2 gap-3">
@@ -563,30 +760,12 @@ const LeadDetail: React.FC = () => {
                                     Research
                                 </Button>
                             </div>
+
+                            {/* Inline Stage Pills In Side Column (Keeping as fallback or secondary) but primarily moving to header below */}
                         </CardContent>
                     </Card>
 
-                    {/* Stage Actions */}
-                    <Card className="border-2 border-slate-800/60 bg-slate-900/40">
-                        <CardHeader><CardTitle className="text-sm uppercase tracking-widest text-slate-500">Pipeline Stage</CardTitle></CardHeader>
-                        <CardContent className="grid grid-cols-2 gap-3">
-                            {CRM_STAGES.map(s => (
-                                <Button
-                                    key={s.id}
-                                    variant="ghost"
-                                    onClick={() => updateLeadMutation.mutate({ ...editForm, stage: s.id })}
-                                    disabled={lead.stage === s.id}
-                                    className={`
-                                        justify-start font-bold capitalize text-xs
-                                        ${lead.stage === s.id ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : 'text-slate-400 hover:text-slate-200'}
-                                    `}
-                                >
-                                    {lead.stage === s.id && <CheckCircle2 className="w-3 h-3 mr-2" />}
-                                    {s.name}
-                                </Button>
-                            ))}
-                        </CardContent>
-                    </Card>
+                    {/* Quick-Action Floating Bar (New Section) is at the bottom of the page */}
                 </div>
 
                 {/* Right Column: Timeline, Actions & Tasks */}
@@ -620,11 +799,28 @@ const LeadDetail: React.FC = () => {
                             <>
                                 <CardHeader className="flex flex-row items-center justify-between border-b border-slate-800/60 pb-6">
                                     <CardTitle className="text-xl font-black text-slate-100 italic">ACTIVITY TIMELINE</CardTitle>
+                                    <div className="flex gap-2">
+                                        {['all', 'call', 'meeting', 'note', 'system'].map((t) => (
+                                            <button
+                                                key={t}
+                                                onClick={() => setFilterType(t === 'all' ? null : t)}
+                                                className={cn(
+                                                    "px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest transition-all border",
+                                                    (filterType === t || (t === 'all' && filterType === null))
+                                                        ? "bg-indigo-500 border-indigo-500 text-white"
+                                                        : "bg-slate-900 border-slate-800 text-slate-500 hover:border-slate-700"
+                                                )}
+                                            >
+                                                {t}
+                                            </button>
+                                        ))}
+                                    </div>
                                 </CardHeader>
                                 <CardContent className="pt-8 flex-1 flex flex-col">
                                     {/* Note Input */}
                                     <div className="mb-8 p-6 bg-slate-950/20 border border-slate-800/50 rounded-2xl">
                                         <textarea
+                                            id="note-input-area"
                                             className="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-slate-300 focus:ring-2 focus:ring-indigo-500/50 outline-none resize-none font-medium text-sm mb-4"
                                             placeholder="Write a quick note about this lead..."
                                             rows={2}
@@ -648,38 +844,40 @@ const LeadDetail: React.FC = () => {
                                         <div className="text-center py-10 text-slate-500">Loading timeline...</div>
                                     ) : activityData?.activities && activityData.activities.length > 0 ? (
                                         <div className="relative border-l-2 border-slate-800 ml-4 space-y-8 py-2">
-                                            {activityData.activities.map((item: any) => (
-                                                <div key={item.id} className="relative pl-10 group">
-                                                    <span className={`absolute -left-[9px] top-1 w-4 h-4 rounded-full border-2 transition-colors shadow-[0_0_0_4px_rgba(15,23,42,1)]
+                                            {activityData.activities
+                                                .filter((item: any) => !filterType || item.type === filterType)
+                                                .map((item: any) => (
+                                                    <div key={item.id} className="relative pl-10 group">
+                                                        <span className={`absolute -left-[9px] top-1 w-4 h-4 rounded-full border-2 transition-colors shadow-[0_0_0_4px_rgba(15,23,42,1)]
                                                         ${item.type === 'system' ? 'bg-slate-800 border-slate-600' :
-                                                            item.type === 'note' ? 'bg-amber-500 border-amber-600' :
-                                                                item.type === 'call' ? 'bg-emerald-500 border-emerald-600' :
-                                                                    item.type === 'meeting' ? 'bg-violet-500 border-violet-600' :
-                                                                        'bg-indigo-500 border-indigo-600'
-                                                        }`} />
+                                                                item.type === 'note' ? 'bg-amber-500 border-amber-600' :
+                                                                    item.type === 'call' ? 'bg-emerald-500 border-emerald-600' :
+                                                                        item.type === 'meeting' ? 'bg-violet-500 border-violet-600' :
+                                                                            'bg-indigo-500 border-indigo-600'
+                                                            }`} />
 
-                                                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-                                                        <div className="bg-slate-950/30 p-4 rounded-2xl border border-slate-800/50 flex-1 hover:border-slate-700 transition-colors">
-                                                            <div className="flex items-center gap-3 mb-2">
-                                                                {item.type === 'note' && <MessageSquare className="w-4 h-4 text-amber-500" />}
-                                                                {item.type === 'call' && <Phone className="w-4 h-4 text-emerald-500" />}
-                                                                {item.type === 'meeting' && <Calendar className="w-4 h-4 text-violet-500" />}
-                                                                {item.type === 'system' && <Zap className="w-4 h-4 text-slate-400" />}
-                                                                <h3 className="text-sm font-bold text-slate-200">
-                                                                    {item.description}
-                                                                </h3>
+                                                        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                                                            <div className="bg-slate-950/30 p-4 rounded-2xl border border-slate-800/50 flex-1 hover:border-slate-700 transition-colors">
+                                                                <div className="flex items-center gap-3 mb-2">
+                                                                    {item.type === 'note' && <MessageSquare className="w-4 h-4 text-amber-500" />}
+                                                                    {item.type === 'call' && <Phone className="w-4 h-4 text-emerald-500" />}
+                                                                    {item.type === 'meeting' && <Calendar className="w-4 h-4 text-violet-500" />}
+                                                                    {item.type === 'system' && <Zap className="w-4 h-4 text-slate-400" />}
+                                                                    <h3 className="text-sm font-bold text-slate-200">
+                                                                        {item.description}
+                                                                    </h3>
+                                                                </div>
+                                                                <p className="text-xs text-slate-500 font-medium flex items-center gap-2">
+                                                                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-500/50" />
+                                                                    Logged by {item.source || 'System'}
+                                                                </p>
                                                             </div>
-                                                            <p className="text-xs text-slate-500 font-medium flex items-center gap-2">
-                                                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500/50" />
-                                                                Logged by {item.source || 'System'}
-                                                            </p>
+                                                            <time className="text-xs text-slate-500 font-semibold tabular-nums mt-2 whitespace-nowrap opacity-60">
+                                                                {new Date(item.created_at).toLocaleString()}
+                                                            </time>
                                                         </div>
-                                                        <time className="text-xs text-slate-500 font-semibold tabular-nums mt-2 whitespace-nowrap opacity-60">
-                                                            {new Date(item.created_at).toLocaleString()}
-                                                        </time>
                                                     </div>
-                                                </div>
-                                            ))}
+                                                ))}
                                         </div>
                                     ) : (
                                         <div className="text-center py-20 flex-1">
@@ -725,6 +923,7 @@ const LeadDetail: React.FC = () => {
                                 <div className="space-y-4">
                                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Detail & Outcome</label>
                                     <textarea
+                                        id="log-interaction-area"
                                         className="w-full bg-slate-950 border-2 border-slate-800 rounded-3xl p-6 text-slate-200 outline-none focus:border-indigo-500 transition-all font-medium min-h-[150px]"
                                         placeholder={`What happened during the ${interactionType}?`}
                                         value={interactionContent}
@@ -825,6 +1024,80 @@ const LeadDetail: React.FC = () => {
                             </>
                         )}
                     </Card>
+                </div>
+            </div>
+
+            {/* Quick-Action Floating Bar */}
+            <div className="fixed bottom-4 left-0 right-0 z-40 px-4">
+                <div className="max-w-[1100px] mx-auto">
+                    <div className="bg-slate-950/80 backdrop-blur-md border border-slate-800 rounded-2xl shadow-2xl shadow-black/40 p-2 flex items-center justify-between gap-2">
+                        <div className="hidden sm:block pl-3 min-w-0">
+                            <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">Quick actions</div>
+                            <div className="text-xs font-bold text-slate-200 truncate">{lead.company_name}</div>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap justify-end">
+                            <Button
+                                size="sm"
+                                className="h-10 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-black text-[10px] uppercase tracking-widest"
+                                onClick={() => { setActiveTab("actions"); setInteractionType("call"); }}
+                            >
+                                <Phone className="w-4 h-4 mr-2" />
+                                Log Call
+                            </Button>
+                            <Button
+                                size="sm"
+                                className="h-10 rounded-xl bg-indigo-600 hover:bg-indigo-500 font-black text-[10px] uppercase tracking-widest"
+                                onClick={() => { setActiveTab("actions"); /* keep existing form, but treat as email */ setInteractionType("note"); setInteractionContent("Email: "); }}
+                            >
+                                <Mail className="w-4 h-4 mr-2" />
+                                Log Email
+                            </Button>
+                            <Button
+                                size="sm"
+                                className="h-10 rounded-xl bg-violet-600 hover:bg-violet-500 font-black text-[10px] uppercase tracking-widest"
+                                onClick={() => {
+                                    setMeetingForm({
+                                        ...meetingForm,
+                                        summary: `Meeting with ${lead.company_name}`,
+                                        start_time: new Date(Date.now() + 3600000).toISOString().slice(0, 16)
+                                    });
+                                    setIsMeetingModalOpen(true);
+                                }}
+                            >
+                                <Calendar className="w-4 h-4 mr-2" />
+                                Book Meeting
+                            </Button>
+                            <Button
+                                size="sm"
+                                variant="secondary"
+                                className="h-10 rounded-xl font-black text-[10px] uppercase tracking-widest border-slate-800"
+                                onClick={() => {
+                                    setActiveTab("timeline");
+                                    setTimeout(() => {
+                                        document.getElementById('note-input-area')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                        document.getElementById('note-input-area')?.focus();
+                                    }, 100);
+                                }}
+                            >
+                                <StickyNote className="w-4 h-4 mr-2" />
+                                Note
+                            </Button>
+                            <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-10 rounded-xl font-black text-[10px] uppercase tracking-widest text-rose-500 hover:text-rose-400 hover:bg-rose-500/10"
+                                onClick={() => {
+                                    if (confirm("Are you sure you want to mark this lead as LOST?")) {
+                                        updateStageMutation.mutate("lost");
+                                    }
+                                }}
+                                isLoading={updateStageMutation.isPending}
+                            >
+                                <XCircle className="w-4 h-4 mr-2" />
+                                Mark Lost
+                            </Button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </Layout >

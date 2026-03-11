@@ -52,3 +52,18 @@ class DashboardResponse(BaseModel):
     stats: List[DashboardStats]
     chart_data: List[Dict[str, Any]]
     recent_activity: List[Dict[str, Any]]
+
+class ActionCenterItem(BaseModel):
+    id: UUID
+    title: str
+    description: Optional[str] = None
+    type: str # 'task', 'lead_assignment', 'inactive_lead', 'notification'
+    severity: str # 'high', 'medium', 'low'
+    due_date: Optional[datetime] = None
+    link: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class ActionCenterResponse(BaseModel):
+    actions: List[ActionCenterItem]
+    counts: Dict[str, int]
+    role: str

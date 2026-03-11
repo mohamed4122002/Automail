@@ -18,10 +18,8 @@ async def seed():
         logger.info("Initializing base seed data pack (MongoDB)...")
         
         # 1. Check if roles exist
-        role_count = await Role.count()
-        if role_count > 0:
-            logger.info("Database seems initialized. Skipping seeding.")
-            return
+        # logger.info("Checking database state...")
+        # We handle idempotency within seed_real_data.py now
 
         logger.info("Redirecting to real data seed...")
         await seed_real_data()

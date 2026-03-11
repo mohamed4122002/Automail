@@ -19,6 +19,7 @@ class CRMSignals:
             "entity": "lead",
             "action": change_type,
             "entity_id": str(lead_id),
+            "lead_id": str(lead_id),
             "user_id": str(user_id),
             "data": data or {},
             "timestamp": None # Will be set by receiver if needed
@@ -27,13 +28,14 @@ class CRMSignals:
         logger.info(f"Broadcasted lead signal: {change_type} for {lead_id}")
 
     @staticmethod
-    def broadcast_task_update(task_id: UUID, user_id: UUID, action: str):
+    def broadcast_task_update(lead_id: UUID, task_id: UUID, user_id: UUID, action: str):
         """Broadcast task-related changes (created, completed)."""
         event = {
             "type": "crm_event",
             "entity": "task",
             "action": action,
             "entity_id": str(task_id),
+            "lead_id": str(lead_id),
             "user_id": str(user_id)
         }
         broadcast_event_sync(event)
@@ -47,6 +49,7 @@ class CRMSignals:
             "entity": "activity",
             "action": "created",
             "entity_id": str(lead_id),
+            "lead_id": str(lead_id),
             "user_id": str(user_id),
             "activity_type": activity_type
         }

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Menu, Bell, User, Plus, LogOut, Settings } from "lucide-react";
+import { Menu, Bell, User, Plus, LogOut, Settings, Calendar } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../auth/AuthContext";
@@ -10,7 +10,7 @@ interface NavbarProps {
 }
 
 import { monitoringService, HealthStatus } from "../../services/monitoring";
-import { Activity, Database, Zap, Cpu } from "lucide-react";
+import { Activity, Database, Zap, Cpu, ShieldCheck } from "lucide-react";
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
 import NotificationCenter from "../dashboard/NotificationCenter";
@@ -95,7 +95,7 @@ const HealthIndicator: React.FC = () => {
 };
 
 export const Navbar: React.FC<NavbarProps> = ({ onMenuClick, title }) => {
-  const { logout } = useAuth();
+  const { logout, isAdmin } = useAuth();
   const navigate = useNavigate();
   const [showProfile, setShowProfile] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -157,6 +157,37 @@ export const Navbar: React.FC<NavbarProps> = ({ onMenuClick, title }) => {
         </Link>
 
         <div className="flex items-center gap-2 border-l border-slate-800 pl-4 ml-2">
+          {/* Admin Portal Shortcut */}
+          {isAdmin && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Link
+                    to="/admin"
+                    className="p-2 text-indigo-400 rounded-full hover:bg-slate-800 hover:text-indigo-300 transition-colors"
+                  >
+                    <ShieldCheck className="w-5 h-5 shadow-[0_0_10px_rgba(99,102,241,0.3)]" />
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent>Admin Portal</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link
+                  to="/calendar"
+                  className="p-2 text-blue-400 rounded-full hover:bg-slate-800 hover:text-blue-300 transition-colors"
+                >
+                  <Calendar className="w-5 h-5" />
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent>Calendar Integrations</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+
           {/* Notifications */}
           <div className="relative" ref={notifRef}>
             <button

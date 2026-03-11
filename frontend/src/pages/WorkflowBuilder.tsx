@@ -35,7 +35,7 @@ import { DecisionNode } from '../components/workflow/nodes/DecisionNode';
 import { ActionNode } from '../components/workflow/nodes/ActionNode';
 import { EndNode } from '../components/workflow/nodes/EndNode';
 import { LEAD_STATUS } from '../lib/constants';
-import { useWebSocket } from '../hooks/useWebSocket';
+import { useGlobalWebSocket } from '../context/WebSocketContext';
 
 const nodeTypes = {
     start: TriggerNode,
@@ -102,32 +102,34 @@ const WorkflowBuilder: React.FC = () => {
     }, [nodes, edges, getLayoutedElements, rfFitView]);
 
     // WebSocket for live node animations
-    const { isConnected } = useWebSocket(`ws://${window.location.host}/api/realtime/ws`, {
-        onMessage: (message) => {
-            if (message.type === 'event' && message.event_type === 'WORKFLOW_NODE_ENTER') {
-                // Ensure it's for this workflow
-                if (message.workflow_id === id) {
-                    const nodeId = message.node_id;
+    const { isConnected, lastMessage } = useGlobalWebSocket();
 
-                    // Add to active set
+    useEffect(() => {
+        if (!lastMessage) return;
+        const message = lastMessage;
+        if (message.type === 'event' && message.event_type === 'WORKFLOW_NODE_ENTER') {
+            // Ensure it's for this workflow
+            if (message.workflow_id === id) {
+                const nodeId = message.node_id;
+
+                // Add to active set
+                setActiveNodes(prev => {
+                    const next = new Set(prev);
+                    next.add(nodeId);
+                    return next;
+                });
+
+                // Remove after 3 seconds
+                setTimeout(() => {
                     setActiveNodes(prev => {
                         const next = new Set(prev);
-                        next.add(nodeId);
+                        next.delete(nodeId);
                         return next;
                     });
-
-                    // Remove after 3 seconds
-                    setTimeout(() => {
-                        setActiveNodes(prev => {
-                            const next = new Set(prev);
-                            next.delete(nodeId);
-                            return next;
-                        });
-                    }, 3000);
-                }
+                }, 3000);
             }
         }
-    });
+    }, [lastMessage, id]);
 
     // Update node classes based on active state
     useEffect(() => {

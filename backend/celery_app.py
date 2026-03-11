@@ -42,6 +42,14 @@ celery_app.conf.beat_schedule = {
     "sync-dashboard-metrics": {
         "task": "sync_dashboard_metrics",
         "schedule": crontab(minute="*/5"), # Every 5 mins
+    },
+    "meeting-reminders": {
+        "task": "send_meeting_reminders",
+        "schedule": crontab(minute="*/15"), # Every 15 mins
+    },
+    "daily-digest": {
+        "task": "send_daily_digest",
+        "schedule": crontab(hour=8, minute=0), # Daily at 8 AM
     }
 }
 

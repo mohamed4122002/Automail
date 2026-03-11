@@ -24,7 +24,7 @@ import {
 import { Input } from "../components/ui/input";
 import api from "../lib/api";
 import { toast } from "sonner";
-import { useWebSocket } from "../hooks/useWebSocket";
+import { useGlobalWebSocket } from "../context/WebSocketContext";
 import {
   ArrowLeft,
   Edit,
@@ -58,7 +58,7 @@ import {
   History as HistoryIcon
 } from "lucide-react";
 import classNames from "classnames";
-
+import { useQueryClient } from "@tanstack/react-query";
 interface Recipient {
   id: string;
   email: string;
@@ -119,19 +119,20 @@ const CampaignDetail: React.FC = () => {
   const [swappingWorkflow, setSwappingWorkflow] = useState(false);
 
   // WebSocket for real-time campaign events
-  useWebSocket(`ws://${window.location.host}/api/ws/dashboard`, {
-    onMessage: (message) => {
+  const { lastMessage } = useGlobalWebSocket();
+  const queryClient = useQueryClient(); // Added useQueryClient hook
+
+  useEffect(() => {
+    if (lastMessage) {
+      const message = lastMessage;
       // Filter for events belonging to this campaign
       if (message.type === 'event' && message.campaign_id === id) {
-        setRecentActivity(prev => [message, ...prev].slice(0, 50));
-
-        // Refresh analytics for significant events
-        if (['opened', 'clicked', 'sent', 'bounced', 'unsubscribed'].includes(message.event_type)) {
-          fetchCampaignDetails();
-        }
+        setRecentActivity(prev => [message as any, ...prev].slice(0, 50));
+        queryClient.invalidateQueries({ queryKey: ["campaign", id] });
+        queryClient.invalidateQueries({ queryKey: ["campaign-events", id] });
       }
     }
-  });
+  }, [lastMessage, id, queryClient]);
 
   // Recipients state
   const {

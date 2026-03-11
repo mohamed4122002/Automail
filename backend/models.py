@@ -1,13 +1,23 @@
 import uuid
 import enum
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field
 from beanie import Document
 import pymongo
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+class LeadSourceEnum(str, enum.Enum):
+    marketing = "Marketing"
+    referral = "Referral"
+    cold_outreach = "Cold Outreach"
+    inbound = "Inbound"
+    website_form = "Website Form"
+    organic_search = "Organic Search"
+    social_media = "Social Media"
+    other = "Other"
 
 class LeadStatusEnum(str, enum.Enum):
     hot = "hot"
@@ -25,7 +35,9 @@ class EventTypeEnum(str, enum.Enum):
     COMPLAINT = "complaint"
 
 class UserRole(str, enum.Enum):
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
+    MANAGER = "manager"
     SALES_LEAD = "sales_lead"
     TEAM_MEMBER = "team_member"
 
@@ -38,6 +50,7 @@ class User(Document):
     is_active: bool = True
     role: UserRole = Field(default=UserRole.TEAM_MEMBER) # Added single role for clarity in CRM
     roles: List[str] = Field(default_factory=list) # Kept for backward compatibility
+    manager_id: Optional[uuid.UUID] = None # For hierarchy (Team Member -> Sales Lead)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -84,7 +97,8 @@ class Campaign(Document):
         name = "campaigns"
         indexes = [
             "name",
-            "owner_id"
+            "owner_id",
+            pymongo.IndexModel([("owner_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
         ]
 
 class Workflow(Document):
@@ -99,7 +113,9 @@ class Workflow(Document):
     class Settings:
         name = "workflows"
         indexes = [
-            pymongo.IndexModel([("name", pymongo.ASCENDING)], unique=True)
+            pymongo.IndexModel([("name", pymongo.ASCENDING)], unique=True),
+            "campaign_id",
+            pymongo.IndexModel([("campaign_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
         ]
 
 class WorkflowNode(Document):
@@ -168,6 +184,7 @@ class EmailSend(Document):
             "status",
             "created_at",
             "user_id", "campaign_id",
+            pymongo.IndexModel([("campaign_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)]),
             pymongo.IndexModel([("unsubscribe_token", pymongo.ASCENDING)], unique=True)
         ]
 
@@ -321,7 +338,8 @@ class EmailVariant(Document):
     class Settings:
         name = "email_variants"
         indexes = [
-            "campaign_id"
+            "campaign_id",
+            pymongo.IndexModel([("campaign_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
         ]
 
 class EmailSendingQueue(Document):
@@ -355,6 +373,25 @@ class UserNote(Document):
             "user_id"
         ]
 
+class Organization(Document):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    name: str
+    industry: Optional[str] = None
+    website: Optional[str] = None
+    logo_url: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "organizations"
+        indexes = [
+            pymongo.IndexModel([("name", pymongo.ASCENDING)], unique=True),
+            pymongo.IndexModel([
+                ("name", pymongo.TEXT),
+                ("industry", pymongo.TEXT)
+            ])
+        ]
+
 class ContactList(Document):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
     name: str
@@ -367,7 +404,8 @@ class ContactList(Document):
         name = "contact_lists"
         indexes = [
             "name",
-            "owner_id"
+            "owner_id",
+            pymongo.IndexModel([("owner_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
         ]
 
 class Contact(Document):
@@ -377,6 +415,7 @@ class Contact(Document):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     attributes: dict = Field(default_factory=dict)
+    organization_id: Optional[uuid.UUID] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -384,7 +423,12 @@ class Contact(Document):
         name = "contacts"
         indexes = [
             "email",
-            "contact_list_id"
+            "contact_list_id",
+            pymongo.IndexModel([
+                ("first_name", pymongo.TEXT),
+                ("last_name", pymongo.TEXT),
+                ("email", pymongo.TEXT)
+            ])
         ]
 
 class CRMLeadStage(str, enum.Enum):
@@ -397,20 +441,31 @@ class CRMLeadStage(str, enum.Enum):
     WON = "won"
     LOST = "lost"
 
+class CurrencyCode(str, enum.Enum):
+    USD = "USD"
+    EGP = "EGP"
+    EUR = "EUR"
+
 class Lead(Document):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
     contact_id: Optional[uuid.UUID] = None # Optional now as leads can come directly
     company_name: str = "TBD"
-    source: str = "Marketing"
+    source: Union[LeadSourceEnum, str] = Field(default=LeadSourceEnum.marketing)
     stage: CRMLeadStage = Field(default=CRMLeadStage.LEAD)
     
     # Assignment
     assigned_to_id: Optional[uuid.UUID] = None
     assigned_by_id: Optional[uuid.UUID] = None
+    organization_id: Optional[uuid.UUID] = None
+
+    # Lead Pool / Claim
+    is_claimable: bool = False
+    claimed_by_id: Optional[uuid.UUID] = None
     
     # Metadata
     proposal_deadline: Optional[datetime] = None
     deal_value: float = 0.0
+    deal_currency: CurrencyCode = Field(default=CurrencyCode.USD)
     last_activity_at: datetime = Field(default_factory=utcnow)
     
     # Existing fields for marketing health (keeping compatibility)
@@ -421,16 +476,36 @@ class Lead(Document):
     last_email_opened_at: Optional[datetime] = None
     last_link_clicked_at: Optional[datetime] = None
     
+    # Assignment (Phase 6)
+    assigned_at: Optional[datetime] = None
+    assignment_type: Optional[str] = None # manual, auto, creator (Phase 6)
+    proposal_deadline: Optional[datetime] = None # For deadline alerts (Phase 6)
+    deadline_reminder_sent: bool = False # Track if alert was sent (Phase 6)
+    
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
     class Settings:
         name = "leads"
         indexes = [
-            # Removing unique constraint on contact_id since we might have empty or duplicate entries during migration
+            # single-field indexes for common filters
             "stage",
             "assigned_to_id",
-            "company_name"
+            "company_name",
+            "is_claimable",
+            "claimed_by_id",
+            "created_at",
+            "last_activity_at",
+            # text index on company_name for regex/search operations
+            pymongo.IndexModel([("company_name", pymongo.TEXT)]),
+            # compound index to support the dashboard and list queries that
+            # filter by assignee and stage while sorting by lead_score.
+            # put lead_score DESC because higher-score leads are often fetched first.
+            pymongo.IndexModel(
+                [("assigned_to_id", pymongo.ASCENDING),
+                 ("stage", pymongo.ASCENDING),
+                 ("lead_score", pymongo.DESCENDING)]
+            ),
         ]
 
 class EmailRetryAttempt(Document):
@@ -490,7 +565,8 @@ class LeadNote(Document):
     class Settings:
         name = "lead_notes"
         indexes = [
-            "lead_id"
+            "lead_id",
+            pymongo.IndexModel([("lead_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
         ]
 
 class ActivityType(str, enum.Enum):
@@ -515,6 +591,7 @@ class CRMActivity(Document):
     type: ActivityType
     content: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    meeting_reminder_sent: bool = False # Automation flag
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -523,7 +600,8 @@ class CRMActivity(Document):
         indexes = [
             "lead_id",
             "user_id",
-            "type"
+            "type",
+            pymongo.IndexModel([("lead_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
         ]
 
 class CRMTask(Document):
@@ -537,6 +615,21 @@ class CRMTask(Document):
     status: TaskStatus = TaskStatus.PENDING
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "crm_tasks"
+        indexes = [
+            "lead_id",
+            "assigned_to_id",
+            "status",
+            "due_date",
+            # compound query for user overdue tasks
+            pymongo.IndexModel(
+                [("assigned_to_id", pymongo.ASCENDING),
+                 ("status", pymongo.ASCENDING),
+                 ("due_date", pymongo.ASCENDING)]
+            )
+        ]
 
 class CRMTarget(Document):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
@@ -564,6 +657,7 @@ class CRMNotification(Document):
     type: str = "info" # "info", "warning", "success", "error"
     link: Optional[str] = None
     is_read: bool = False
+    scheduled_at: Optional[datetime] = None # Future reminders
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -606,6 +700,47 @@ class GlobalMetrics(Document):
             "updated_at"
         ]
 
+class LeadScoreLog(Document):
+    """Tracks individual scoring events that contributed to a lead's score."""
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    lead_id: uuid.UUID
+    event_type: str  # e.g. 'email_opened', 'email_replied', 'meeting_booked'
+    points: int
+    note: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "lead_score_logs"
+        indexes = ["lead_id", "event_type", "created_at"]
+
+class CRMKanbanOrder(Document):
+    """Per-user persisted ordering of CRM Kanban columns (stages)."""
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    user_id: uuid.UUID
+    stage_order: List[str] = Field(default_factory=list)  # e.g. ["lead","call",...]
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "crm_kanban_order"
+        indexes = [
+            pymongo.IndexModel([("user_id", pymongo.ASCENDING)], unique=True)
+        ]
+
+class CRMInboundEmail(Document):
+    """Stores parsed inbound emails for auditing and potential lead creation."""
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, alias="_id")
+    from_email: str
+    subject: str
+    body: str
+    lead_id: Optional[uuid.UUID] = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "crm_inbound_emails"
+        indexes = ["from_email", "lead_id", "created_at"]
+
+
 __beanie_models__ = [
     User, UserAttribute, Campaign, Workflow, WorkflowNode, WorkflowEdge,
     EmailTemplate, EmailSend, Event, LeadScore, Pipeline, PipelineItem,
@@ -613,5 +748,5 @@ __beanie_models__ = [
     ConditionEvaluationLog, EmailVariant, EmailSendingQueue, UserNote,
     ContactList, Contact, Lead, EmailRetryAttempt, Setting, Role, LeadNote,
     CRMActivity, CRMTask, CRMTarget, CRMNotification, OAuthToken,
-    GlobalMetrics
+    GlobalMetrics, Organization, LeadScoreLog, CRMKanbanOrder, CRMInboundEmail
 ]

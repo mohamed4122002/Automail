@@ -1,4 +1,5 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
+import { useDebounce } from '../hooks/useDebounce';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Layout from '../components/layout/Layout';
 import { Card } from '../components/ui/Card';
@@ -11,10 +12,12 @@ import {
     Users, Mail, TrendingUp, Snowflake,
     Zap, Search, Activity, Clock,
     CheckCircle2, XCircle, BarChart3,
-    MoreHorizontal, Calendar
+    MoreHorizontal, Calendar, UserPlus
 } from 'lucide-react';
+import { AddLeadModal } from '../components/modals/AddLeadModal';
+import { useAuth } from '../auth/AuthContext';
 import { Link } from 'react-router-dom';
-import { useWebSocket } from '../hooks/useWebSocket';
+import { useGlobalWebSocket } from '../context/WebSocketContext';
 import { cn } from '../lib/utils';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { Modal } from '../components/ui/Modal';
@@ -57,11 +60,15 @@ const CRM_STAGES = [
 
 const LeadsPipeline: React.FC = () => {
     const [searchTerm, setSearchTerm] = useState('');
+    const debouncedSearch = useDebounce(searchTerm, 300);
     const [transitionModal, setTransitionModal] = useState<TransitionModalState | null>(null);
     const [dealValue, setDealValue] = useState<string>('');
     const [note, setNote] = useState<string>('');
     const [meetingDate, setMeetingDate] = useState<string>('');
     const [proposalDate, setProposalDate] = useState<string>('');
+    const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+    const { user } = useAuth();
+    const isManager = ['super_admin', 'admin', 'manager'].includes(user?.role || '');
 
     // Reference to the scrollable Kanban container
     const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -69,14 +76,7 @@ const LeadsPipeline: React.FC = () => {
 
     const queryClient = useQueryClient();
 
-    useWebSocket(`ws://${window.location.host}/api/ws/dashboard`, {
-        onMessage: (msg) => {
-            if (msg.type === 'crm_event' || msg.type === 'event') {
-                queryClient.invalidateQueries({ queryKey: ['leads'] });
-                queryClient.invalidateQueries({ queryKey: ['lead-stats'] });
-            }
-        }
-    });
+    useGlobalWebSocket();
 
     const { data: stats, isLoading: statsLoading } = useQuery<LeadStats>({
         queryKey: ['lead-stats'],
@@ -84,12 +84,158 @@ const LeadsPipeline: React.FC = () => {
     });
 
     const { data: leads, isLoading: leadsLoading } = useQuery<Lead[]>({
-        queryKey: ['leads', 'all', searchTerm],
+        queryKey: ['leads', 'all', debouncedSearch],
         queryFn: async () => {
             const params = new URLSearchParams();
-            if (searchTerm) params.append('search', searchTerm);
+            if (debouncedSearch) params.append('search', debouncedSearch);
             return (await api.get(`/leads?${params}`)).data;
         }
+    });
+
+    // group leads by stage, memoized so each stage column only re-renders when
+    // its own list changes
+    const leadsGrouped = useMemo(() => {
+        if (!leads || !Array.isArray(leads)) return {} as Record<string, Lead[]>;
+        return leads.reduce((acc: Record<string, Lead[]>, l) => {
+            acc[l.stage] = acc[l.stage] || [];
+            acc[l.stage].push(l);
+            return acc;
+        }, {});
+    }, [leads]);
+
+    const StageColumn: React.FC<{ stage: typeof CRM_STAGES[0]; leads: Lead[] }> = React.memo(({ stage, leads }) => {
+        const isWon = stage.id === 'won';
+        const isLost = stage.id === 'lost';
+
+        return (
+            <div key={stage.id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm flex flex-col">
+                {/* Top Accent Line */}
+                <div className={cn(
+                    "h-1 w-full",
+                    isWon ? "bg-emerald-500" : isLost ? "bg-rose-500" : "bg-indigo-500"
+                )} />
+
+                {/* Group Header */}
+                <div className="bg-slate-800/40 px-5 py-3 flex items-center justify-between border-b border-slate-800/80">
+                    <div className="flex items-center gap-3">
+                        <span className={cn(
+                            "w-6 h-6 rounded flex items-center justify-center",
+                            isWon ? "bg-emerald-500/20 text-emerald-400" :
+                                isLost ? "bg-rose-500/20 text-rose-400" :
+                                    "bg-indigo-500/20 text-indigo-400"
+                        )}>
+                            {React.cloneElement(stage.icon as React.ReactElement, { className: "w-4 h-4" })}
+                        </span>
+                        <h3 className="text-sm font-bold text-slate-200 tracking-wider uppercase">
+                            {stage.name}
+                        </h3>
+                        <Badge variant="neutral" className="ml-2 bg-slate-950 text-slate-400 font-bold border border-slate-800">
+                            {leads.length} Leads
+                        </Badge>
+                    </div>
+                </div>
+
+                {/* Table Columns Header */}
+                {leads.length > 0 && (
+                    <div className="grid grid-cols-12 gap-4 px-6 py-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest border-b border-slate-800/50 bg-slate-900/50">
+                        <div className="col-span-4 pl-3">Company Name</div>
+                        <div className="col-span-2">Source</div>
+                        <div className="col-span-2">Score</div>
+                        <div className="col-span-3">Assigned To</div>
+                        <div className="col-span-1 text-right">Action</div>
+                    </div>
+                )}
+
+                {/* Droppable Area */}
+                <Droppable droppableId={stage.id}>
+                    {(provided, snapshot) => (
+                        <div
+                            ref={provided.innerRef}
+                            {...provided.droppableProps}
+                            className={cn(
+                                "flex flex-col gap-1.5 min-h-[60px] p-2 transition-colors",
+                                snapshot.isDraggingOver ? "bg-slate-800/20 ring-1 ring-inset ring-indigo-500/50 rounded-b-xl" : ""
+                            )}
+                        >
+                            {leads.length === 0 && (
+                                <div className={cn(
+                                    "flex items-center justify-center h-16 text-slate-500 transition-opacity",
+                                    snapshot.isDraggingOver ? "opacity-0" : "opacity-100"
+                                )}>
+                                    <span className="text-xs font-semibold">No leads currently in {stage.name}</span>
+                                </div>
+                            )}
+
+                            {leads.map((lead, index) => (
+                                <Draggable key={lead.id} draggableId={String(lead.id)} index={index}>
+                                    {(provided, snapshot) => (
+                                        <div
+                                            ref={provided.innerRef}
+                                            {...provided.draggableProps}
+                                            {...provided.dragHandleProps}
+                                            className={cn(
+                                                "grid grid-cols-12 gap-4 items-center px-4 py-3 bg-slate-950/40 hover:bg-slate-800/80 border border-transparent rounded-lg cursor-grab active:cursor-grabbing transition-colors",
+                                                snapshot.isDragging ? "shadow-2xl border-indigo-500/50 scale-[1.01] bg-slate-900 z-50" : "hover:border-slate-700/50"
+                                            )}
+                                            style={{
+                                                ...provided.draggableProps.style,
+                                            }}
+                                        >
+                                            <div className="flex items-center gap-3 col-span-4">
+                                                <div className={cn(
+                                                    "w-1.5 h-1.5 rounded-full flex-shrink-0",
+                                                    lead.lead_score > 70 ? "bg-emerald-500" : lead.lead_score > 40 ? "bg-amber-500" : "bg-rose-500"
+                                                )} />
+                                                <span className="font-semibold text-sm text-slate-200 truncate" title={lead.company_name}>
+                                                    {lead.company_name}
+                                                </span>
+                                                {lead.lead_score > 70 && !snapshot.isDragging && (
+                                                    <Badge variant="success" className="text-[9px] px-1.5 py-0">Hot</Badge>
+                                                )}
+                                            </div>
+
+                                            <div className="col-span-2">
+                                                <Badge variant="neutral" className="text-[10px] font-medium bg-slate-800 text-slate-400 border border-slate-700/50">
+                                                    {lead.source}
+                                                </Badge>
+                                            </div>
+
+                                            <div className="flex items-center gap-1.5 col-span-2">
+                                                <span className="text-xs font-bold text-slate-400">{lead.lead_score}</span>
+                                                <span className="text-[10px] text-slate-600">pts</span>
+                                            </div>
+
+                                            <div className="col-span-3">
+                                                {lead.assigned_to_name ? (
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-[9px] font-bold text-white shadow-sm ring-1 ring-slate-900" title={lead.assigned_to_name}>
+                                                            {lead.assigned_to_name[0]}
+                                                        </div>
+                                                        <span className="text-xs text-slate-400 truncate">{lead.assigned_to_name.split(' ')[0]}</span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="w-5 h-5 rounded-full bg-slate-800 flex items-center justify-center text-[10px] text-slate-500 border border-slate-700 border-dashed">?</div>
+                                                        <span className="text-xs text-slate-600 italic">Unassigned</span>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="flex justify-end col-span-1">
+                                                <Link to={`/leads/${lead.id}`} className="p-1.5 text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 rounded-md transition-colors" title="View details">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>
+                                                </Link>
+                                            </div>
+                                        </div>
+                                    )}
+                                </Draggable>
+                            ))}
+                            {provided.placeholder}
+                        </div>
+                    )}
+                </Droppable>
+            </div>
+        );
     });
 
     const updateLead = useMutation({
@@ -272,6 +418,15 @@ const LeadsPipeline: React.FC = () => {
 
                     {/* Search */}
                     <div className="flex items-center gap-3">
+                        {isManager && (
+                            <Button
+                                onClick={() => setIsAddModalOpen(true)}
+                                className="bg-indigo-500 hover:bg-indigo-600 text-white shadow-lg shadow-indigo-500/20 px-6 h-11 flex items-center gap-2 font-black italic tracking-tighter uppercase text-xs"
+                            >
+                                <UserPlus className="w-4 h-4" />
+                                Add Lead
+                            </Button>
+                        )}
                         <div className="relative">
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                             <input
@@ -323,141 +478,9 @@ const LeadsPipeline: React.FC = () => {
                             </div>
                         ) : (
                             <div className="space-y-6 min-w-[800px]">
-                                {CRM_STAGES.map(stage => {
-                                    const stageLeads = leads?.filter(l => l.stage === stage.id) || [];
-                                    const isWon = stage.id === 'won';
-                                    const isLost = stage.id === 'lost';
-
-                                    return (
-                                        <div key={stage.id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm flex flex-col">
-                                            {/* Top Accent Line */}
-                                            <div className={cn(
-                                                "h-1 w-full",
-                                                isWon ? "bg-emerald-500" : isLost ? "bg-rose-500" : "bg-indigo-500"
-                                            )} />
-
-                                            {/* Group Header */}
-                                            <div className="bg-slate-800/40 px-5 py-3 flex items-center justify-between border-b border-slate-800/80">
-                                                <div className="flex items-center gap-3">
-                                                    <span className={cn(
-                                                        "w-6 h-6 rounded flex items-center justify-center",
-                                                        isWon ? "bg-emerald-500/20 text-emerald-400" :
-                                                            isLost ? "bg-rose-500/20 text-rose-400" :
-                                                                "bg-indigo-500/20 text-indigo-400"
-                                                    )}>
-                                                        {React.cloneElement(stage.icon as React.ReactElement, { className: "w-4 h-4" })}
-                                                    </span>
-                                                    <h3 className="text-sm font-bold text-slate-200 tracking-wider uppercase">
-                                                        {stage.name}
-                                                    </h3>
-                                                    <Badge variant="neutral" className="ml-2 bg-slate-950 text-slate-400 font-bold border border-slate-800">
-                                                        {stageLeads.length} Leads
-                                                    </Badge>
-                                                </div>
-                                            </div>
-
-                                            {/* Table Columns Header */}
-                                            {stageLeads.length > 0 && (
-                                                <div className="grid grid-cols-12 gap-4 px-6 py-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest border-b border-slate-800/50 bg-slate-900/50">
-                                                    <div className="col-span-4 pl-3">Company Name</div>
-                                                    <div className="col-span-2">Source</div>
-                                                    <div className="col-span-2">Score</div>
-                                                    <div className="col-span-3">Assigned To</div>
-                                                    <div className="col-span-1 text-right">Action</div>
-                                                </div>
-                                            )}
-
-                                            {/* Droppable Area */}
-                                            <Droppable droppableId={stage.id}>
-                                                {(provided, snapshot) => (
-                                                    <div
-                                                        ref={provided.innerRef}
-                                                        {...provided.droppableProps}
-                                                        className={cn(
-                                                            "flex flex-col gap-1.5 min-h-[60px] p-2 transition-colors",
-                                                            snapshot.isDraggingOver ? "bg-slate-800/20 ring-1 ring-inset ring-indigo-500/50 rounded-b-xl" : ""
-                                                        )}
-                                                    >
-                                                        {stageLeads.length === 0 && (
-                                                            <div className={cn(
-                                                                "flex items-center justify-center h-16 text-slate-500 transition-opacity",
-                                                                snapshot.isDraggingOver ? "opacity-0" : "opacity-100"
-                                                            )}>
-                                                                <span className="text-xs font-semibold">No leads currently in {stage.name}</span>
-                                                            </div>
-                                                        )}
-
-                                                        {stageLeads.map((lead, index) => (
-                                                            <Draggable key={lead.id} draggableId={String(lead.id)} index={index}>
-                                                                {(provided, snapshot) => (
-                                                                    <div
-                                                                        ref={provided.innerRef}
-                                                                        {...provided.draggableProps}
-                                                                        {...provided.dragHandleProps}
-                                                                        className={cn(
-                                                                            "grid grid-cols-12 gap-4 items-center px-4 py-3 bg-slate-950/40 hover:bg-slate-800/80 border border-transparent rounded-lg cursor-grab active:cursor-grabbing transition-colors",
-                                                                            snapshot.isDragging ? "shadow-2xl border-indigo-500/50 scale-[1.01] bg-slate-900 z-50" : "hover:border-slate-700/50"
-                                                                        )}
-                                                                        style={{
-                                                                            ...provided.draggableProps.style,
-                                                                        }}
-                                                                    >
-                                                                        <div className="flex items-center gap-3 col-span-4">
-                                                                            <div className={cn(
-                                                                                "w-1.5 h-1.5 rounded-full flex-shrink-0",
-                                                                                lead.lead_score > 70 ? "bg-emerald-500" : lead.lead_score > 40 ? "bg-amber-500" : "bg-rose-500"
-                                                                            )} />
-                                                                            <span className="font-semibold text-sm text-slate-200 truncate" title={lead.company_name}>
-                                                                                {lead.company_name}
-                                                                            </span>
-                                                                            {lead.lead_score > 70 && !snapshot.isDragging && (
-                                                                                <Badge variant="success" className="text-[9px] px-1.5 py-0">Hot</Badge>
-                                                                            )}
-                                                                        </div>
-
-                                                                        <div className="col-span-2">
-                                                                            <Badge variant="neutral" className="text-[10px] font-medium bg-slate-800 text-slate-400 border border-slate-700/50">
-                                                                                {lead.source}
-                                                                            </Badge>
-                                                                        </div>
-
-                                                                        <div className="flex items-center gap-1.5 col-span-2">
-                                                                            <span className="text-xs font-bold text-slate-400">{lead.lead_score}</span>
-                                                                            <span className="text-[10px] text-slate-600">pts</span>
-                                                                        </div>
-
-                                                                        <div className="col-span-3">
-                                                                            {lead.assigned_to_name ? (
-                                                                                <div className="flex items-center gap-2">
-                                                                                    <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-[9px] font-bold text-white shadow-sm ring-1 ring-slate-900" title={lead.assigned_to_name}>
-                                                                                        {lead.assigned_to_name[0]}
-                                                                                    </div>
-                                                                                    <span className="text-xs text-slate-400 truncate">{lead.assigned_to_name.split(' ')[0]}</span>
-                                                                                </div>
-                                                                            ) : (
-                                                                                <div className="flex items-center gap-2">
-                                                                                    <div className="w-5 h-5 rounded-full bg-slate-800 flex items-center justify-center text-[10px] text-slate-500 border border-slate-700 border-dashed">?</div>
-                                                                                    <span className="text-xs text-slate-600 italic">Unassigned</span>
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-
-                                                                        <div className="flex justify-end col-span-1">
-                                                                            <Link to={`/leads/${lead.id}`} className="p-1.5 text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 rounded-md transition-colors" title="View details">
-                                                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>
-                                                                            </Link>
-                                                                        </div>
-                                                                    </div>
-                                                                )}
-                                                            </Draggable>
-                                                        ))}
-                                                        {provided.placeholder}
-                                                    </div>
-                                                )}
-                                            </Droppable>
-                                        </div>
-                                    );
-                                })}
+                                {CRM_STAGES.map(stage => (
+                                    <StageColumn key={stage.id} stage={stage} leads={leadsGrouped[stage.id] || []} />
+                                ))}
                             </div>
                         )}
                     </div>
@@ -617,6 +640,11 @@ const LeadsPipeline: React.FC = () => {
                     </div>
                 </Modal>
             )}
+
+            <AddLeadModal
+                isOpen={isAddModalOpen}
+                onClose={() => setIsAddModalOpen(false)}
+            />
         </Layout>
     );
 };

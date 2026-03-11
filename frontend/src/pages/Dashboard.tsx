@@ -11,10 +11,11 @@ import { ReputationWidget } from "../components/dashboard/ReputationWidget";
 
 import { WorkerStatusIndicator } from "../components/system/WorkerStatus";
 import CRMTargetWidget from "../components/dashboard/CRMTargetWidget";
+import RevenueForecast from "../components/admin/RevenueForecast";
 import { Send, MousePointerClick, BookOpen, Clock, ArrowUpRight, Filter, Flame, X, BarChart3 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useWebSocket } from "../hooks/useWebSocket";
+import { useGlobalWebSocket } from "../context/WebSocketContext";
 import api from "../lib/api";
 import { monitoringService } from "../services/monitoring";
 import { Skeleton } from "../components/ui/Skeleton";
@@ -67,26 +68,22 @@ const Dashboard: React.FC = () => {
     }
   };
 
-  // WebSocket for real-time events
-  const { isConnected, lastMessage } = useWebSocket(`ws://${window.location.host}/api/ws/dashboard`, {
-    onMessage: (message) => {
-      // 1. Refetch dashboard and relevant data on events
-      if (message.type === 'event' || message.type === 'crm_event') {
-        queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-        queryClient.invalidateQueries({ queryKey: ['lead-stats'] });
-      }
+  // Global WebSocket Context
+  const { lastMessage } = useGlobalWebSocket();
 
-      // 2. Handle Hot Lead Alerts
-      if (message.is_hot_lead) {
-        setHotLead(message);
-        playPing();
-        showBrowserNotification(message.user_email);
+  React.useEffect(() => {
+    if (!lastMessage) return;
 
-        // Auto-hide toast after 8 seconds
-        setTimeout(() => setHotLead(null), 8000);
-      }
+    // Handle Hot Lead Alerts globally on Dashboard
+    if (lastMessage.is_hot_lead) {
+      setHotLead(lastMessage);
+      playPing();
+      showBrowserNotification(lastMessage.user_email);
+
+      // Auto-hide toast after 8 seconds
+      setTimeout(() => setHotLead(null), 8000);
     }
-  });
+  }, [lastMessage]);
 
   // Fetch workflows for filter dropdown
   const { data: workflows } = useQuery({
@@ -113,7 +110,7 @@ const Dashboard: React.FC = () => {
       if (selectedWorkflow) params.append('workflow_id', selectedWorkflow);
       if (selectedCampaign) params.append('campaign_id', selectedCampaign);
 
-      const response = await api.get(`/analytics/dashboard?${params.toString()}`);
+      const response = await api.get(`/ analytics / dashboard ? ${params.toString()} `);
       return response.data;
     }
   });
@@ -148,14 +145,14 @@ const Dashboard: React.FC = () => {
     },
     {
       title: "Open Rate",
-      value: `${metrics.open_rate}%`,
+      value: `${metrics.open_rate}% `,
       trend: { value: metrics.open_rate_trend, isPositive: metrics.open_rate_trend > 0 },
       icon: <BookOpen className="w-5 h-5" />,
       description: "Avg performance"
     },
     {
       title: "Click Rate",
-      value: `${metrics.click_rate}%`,
+      value: `${metrics.click_rate}% `,
       trend: { value: metrics.click_rate_trend, isPositive: metrics.click_rate_trend > 0 },
       icon: <MousePointerClick className="w-5 h-5" />,
       description: "vs. last month"
@@ -194,6 +191,7 @@ const Dashboard: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 gap-6 mt-8 lg:grid-cols-3">
+        <RevenueForecast />
         <CRMTargetWidget />
         <Card className="lg:col-span-2">
           <CardHeader className="flex flex-row items-center justify-between">
@@ -271,7 +269,7 @@ const Dashboard: React.FC = () => {
                       Just Clicked
                     </span>
                     <Link
-                      to={`/users/${hotLead.user_id}`}
+                      to={`/ users / ${hotLead.user_id} `}
                       className="text-[10px] text-white underline hover:text-emerald-300 font-bold uppercase tracking-wider"
                     >
                       View Lead →

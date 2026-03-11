@@ -19,12 +19,13 @@ class UserNote(UserNoteBase, IDSchema, TimestampSchema):
 class UserBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     
-    email: EmailStr
+    email: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     is_active: bool = True
     role: str = "team_member"
     roles: List[str] = []
+    manager_id: Optional[UUID] = None # Phase 6
 
 class UserProfile(UserBase, IDSchema, TimestampSchema):
     model_config = ConfigDict(from_attributes=True)
@@ -43,6 +44,9 @@ class UserTimelineEvent(BaseModel):
 class UserRoleUpdate(BaseModel):
     role: str
     roles: Optional[List[str]] = None
+
+class UserManagerUpdate(BaseModel):
+    manager_id: Optional[UUID] = None # Phase 6
 
 class UserDetailResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Card } from '../ui/Card';
-import { useWebSocket } from '../../hooks/useWebSocket';
+import { useGlobalWebSocket } from '../../context/WebSocketContext';
 import { Activity, Mail, MousePointer, AlertCircle, Volume2, Layers, Settings } from 'lucide-react';
 
 interface ActivityEvent {
@@ -20,27 +20,23 @@ export const LiveActivityFeed: React.FC = () => {
     const [soundEnabled, setSoundEnabled] = useState(true);
     const audioRef = useRef<HTMLAudioElement | null>(null);
 
-    // Get WebSocket URL from environment or default to current host
-    const wsUrl = import.meta.env.VITE_WS_URL || `ws://${window.location.host}/api/ws/dashboard`;
+    const { isConnected, lastMessage } = useGlobalWebSocket();
 
-    const { isConnected } = useWebSocket(wsUrl, {
-        onMessage: (message) => {
-            if (message.type === 'event') {
-                const event = message as ActivityEvent;
+    useEffect(() => {
+        if (!lastMessage) return;
 
-                // Add to events list (keep last 20)
-                setEvents(prev => [event, ...prev].slice(0, 20));
+        if (lastMessage.type === 'event') {
+            const event = lastMessage as ActivityEvent;
 
-                // Play sound for hot leads (clicks)
-                if (event.is_hot_lead && soundEnabled && audioRef.current) {
-                    audioRef.current.play().catch(e => console.log('Audio play failed:', e));
-                }
+            // Add to events list (keep last 20)
+            setEvents(prev => [event, ...prev].slice(0, 20));
+
+            // Play sound for hot leads (clicks)
+            if (event.is_hot_lead && soundEnabled && audioRef.current) {
+                audioRef.current.play().catch(e => console.log('Audio play failed:', e));
             }
-        },
-        onConnect: () => {
-            console.log('Live activity feed connected');
         }
-    });
+    }, [lastMessage, soundEnabled]);
 
     // Initialize audio element
     useEffect(() => {

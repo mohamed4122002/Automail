@@ -2,6 +2,7 @@ import os
 import json
 from typing import Optional, List, Dict, Any
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
@@ -17,7 +18,6 @@ class GoogleCalendarService:
     @staticmethod
     def get_flow(redirect_uri: str):
         """Create a Google OAuth2 flow instance."""
-        # Note: In a real app, these would be in environment variables
         client_config = {
             "web": {
                 "client_id": os.getenv("GOOGLE_CLIENT_ID"),
@@ -42,7 +42,7 @@ class GoogleCalendarService:
             "token_uri": credentials.token_uri,
             "client_id": credentials.client_id,
             "client_secret": credentials.client_secret,
-            "scopes": credentials.scopes
+            "scopes": list(credentials.scopes) if credentials.scopes else []
         }
         
         token_doc = await OAuthToken.find_one(
@@ -52,7 +52,7 @@ class GoogleCalendarService:
         
         if token_doc:
             token_doc.token_data = token_data
-            token_doc.scopes = credentials.scopes
+            token_doc.scopes = token_data["scopes"]
             token_doc.updated_at = datetime.utcnow()
             await token_doc.save()
         else:
@@ -60,7 +60,7 @@ class GoogleCalendarService:
                 user_id=user_id,
                 provider="google",
                 token_data=token_data,
-                scopes=credentials.scopes
+                scopes=token_data["scopes"]
             )
             await token_doc.insert()
             
@@ -68,7 +68,10 @@ class GoogleCalendarService:
 
     @staticmethod
     async def get_calendar_client(user_id: uuid.UUID):
-        """Get an authorized Google Calendar API client."""
+        """
+        Get an authorized Google Calendar API client.
+        Automatically refreshes the access token if it has expired.
+        """
         token_doc = await OAuthToken.find_one(
             OAuthToken.user_id == user_id,
             OAuthToken.provider == "google"
@@ -76,12 +79,25 @@ class GoogleCalendarService:
         
         if not token_doc:
             return None
-            
+        
+        td = token_doc.token_data
         creds = Credentials(
-            **token_doc.token_data
+            token=td.get("token"),
+            refresh_token=td.get("refresh_token"),
+            token_uri=td.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=td.get("client_id"),
+            client_secret=td.get("client_secret"),
+            scopes=td.get("scopes"),
         )
         
-        # Build the service
+        # Refresh if expired
+        if creds.expired and creds.refresh_token:
+            creds.refresh(GoogleAuthRequest())
+            # Persist the refreshed token
+            token_doc.token_data["token"] = creds.token
+            token_doc.updated_at = datetime.utcnow()
+            await token_doc.save()
+        
         service = build('calendar', 'v3', credentials=creds)
         return service
 
@@ -117,5 +133,9 @@ class GoogleCalendarService:
             },
         }
         
-        event = service.events().insert(calendarId='primary', body=event).execute()
+        event = service.events().insert(
+            calendarId='primary', 
+            body=event,
+            sendUpdates='all'
+        ).execute()
         return event

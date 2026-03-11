@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from ..models import Lead, User, LeadNote, CRMLeadStage, CRMActivity, ActivityType, CRMTask, TaskStatus
 from ..schemas.leads import LeadUpdate
 from ..signals import CRMSignals
+from ..cache import delete_cache
 
 class LeadService:
     # Existing methods...
@@ -54,11 +55,16 @@ class LeadService:
             change_type="stage_transition",
             data={"from": str(old_stage), "to": str(new_stage)}
         )
-        
+
+        # Bust cached stats so next request reflects the new stage
+        await delete_cache("leads:stats")
+        await delete_cache("leads:pipeline_summary")
+        await delete_cache("analytics:dashboard:*")
+
         return lead
 
     @staticmethod
-    async def assign_lead(lead_id: UUID, assigned_to_id: UUID, assigned_by_id: UUID) -> Lead:
+    async def assign_lead(lead_id: UUID, assigned_to_id: UUID, assigned_by_id: UUID, assignment_type: str = "manual") -> Lead:
         lead = await Lead.find_one(Lead.id == lead_id)
         if not lead:
             raise ValueError("Lead not found")
@@ -69,6 +75,8 @@ class LeadService:
             
         lead.assigned_to_id = assigned_to_id
         lead.assigned_by_id = assigned_by_id
+        lead.assigned_at = datetime.now(timezone.utc)
+        lead.assignment_type = assignment_type
         lead.claimed_at = datetime.now(timezone.utc)
         lead.last_activity_at = datetime.now(timezone.utc)
         
@@ -79,7 +87,7 @@ class LeadService:
             lead_id=lead_id,
             user_id=assigned_by_id,
             activity_type=ActivityType.SYSTEM,
-            content=f"Lead assigned to {assignee.email}"
+            content=f"Lead assigned to {assignee.email} (Type: {assignment_type})"
         )
         
         return lead
@@ -160,6 +168,6 @@ class LeadService:
         )
 
         # Broadcast task signal
-        CRMSignals.broadcast_task_update(task.id, user_id, f"status_{status}")
+        CRMSignals.broadcast_task_update(task.lead_id, task.id, user_id, f"status_{status}")
         
         return task

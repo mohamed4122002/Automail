@@ -2,11 +2,24 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from .db import init_db, close_db
+from .change_streams import start_change_streams, stop_change_streams
+from .idempotency import IdempotencyMiddleware
+import logging
+
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Start MongoDB Change Streams as a background fallback sync mechanism
+    try:
+        from .db import client as motor_client
+        db = motor_client.get_default_database(default="marketing_automation")
+        await start_change_streams(db)
+    except Exception as exc:
+        logger.warning("Could not start Change Streams (replica set required): %s", exc)
     yield
+    await stop_change_streams()
     await close_db()
 
 from .config import settings
@@ -34,6 +47,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    # Standardize idempotency for all mutating requests
+    app.add_middleware(IdempotencyMiddleware)
 
     api_router = APIRouter(prefix="/api")
     
@@ -119,9 +135,25 @@ def create_app() -> FastAPI:
     from .api import integrations as integrations_api
     api_router.include_router(integrations_api.router)
 
+    # Meetings Router
+    from .api import meetings as meetings_api
+    api_router.include_router(meetings_api.router)
+
     # Inbound Router (Forms/Webhooks)
     from .api import inbound as inbound_api
     api_router.include_router(inbound_api.router)
+
+    # Organizations Router
+    from .api import organizations as organizations_api
+    api_router.include_router(organizations_api.router)
+
+    # Personal Dashboard Router (Phase 2)
+    from .api import dashboard_me as dashboard_me_api
+    api_router.include_router(dashboard_me_api.router)
+
+    # Search Router (Phase 5)
+    from .api import search as search_api
+    api_router.include_router(search_api.router)
 
     app.include_router(api_router)
 

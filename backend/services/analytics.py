@@ -16,47 +16,69 @@ class AnalyticsService:
         Aggregate performance metrics for a specific user or the whole team.
         """
         # Base filters
-        lead_filters = []
-        activity_filters = []
+        lead_match = {}
+        activity_match = {}
 
         if user_id:
-            lead_filters.append(Lead.assigned_to_id == user_id)
-            activity_filters.append(CRMActivity.user_id == user_id)
+            lead_match["assigned_to_id"] = user_id
+            activity_match["user_id"] = user_id
         
         if start_date:
-            activity_filters.append(CRMActivity.created_at >= start_date)
-            # For leads, we might want to check when they were updated to 'won'/'lost'
-            # but for now let's use created_at for simplicity or assume they were won recently
-        
+            activity_match["created_at"] = {"$gte": start_date}
         if end_date:
-            activity_filters.append(CRMActivity.created_at <= end_date)
+            if "created_at" in activity_match:
+                activity_match["created_at"]["$lte"] = end_date
+            else:
+                activity_match["created_at"] = {"$lte": end_date}
 
-        # 1. Revenue & Lead Counts
-        query = Lead.find(*lead_filters)
-        leads = await query.to_list()
+        # 1. Revenue & Lead Counts via Aggregation
+        lead_pipeline = [
+            {"$match": lead_match} if lead_match else {"$match": {}},
+            {"$group": {
+                "_id": "$stage",
+                "count": {"$sum": 1},
+                "revenue": {"$sum": {"$cond": [{"$eq": ["$stage", "won"]}, "$deal_value", 0]}}
+            }}
+        ]
         
-        won_leads = [l for l in leads if l.stage == "won"]
-        lost_leads = [l for l in leads if l.stage == "lost"]
+        lead_results = await Lead.get_motor_collection().aggregate(lead_pipeline).to_list(length=None)
         
-        revenue = sum(getattr(l, "deal_value", 0) for l in won_leads) # Assuming deal_value exists or using score/metadata
-        # Wait, I should check if Lead model has deal_value. If not, I'll use 0 or score.
-        # Let's assume deal_value for now and check later.
+        won_leads = 0
+        lost_leads = 0
+        revenue = 0.0
         
-        # 2. Activity Counts
-        activities = await CRMActivity.find(*activity_filters).to_list()
+        for r in lead_results:
+            if r["_id"] == "won":
+                won_leads = r["count"]
+                revenue = r["revenue"]
+            elif r["_id"] == "lost":
+                lost_leads = r["count"]
+
+        # 2. Activity Counts via Aggregation
+        act_pipeline = [
+            {"$match": activity_match} if activity_match else {"$match": {}},
+            {"$group": {
+                "_id": "$type",
+                "count": {"$sum": 1}
+            }}
+        ]
+        
+        act_results = await CRMActivity.get_motor_collection().aggregate(act_pipeline).to_list(length=None)
+        
+        act_counts = {r["_id"]: r["count"] for r in act_results}
         
         stats = PerformanceStats(
             revenue=float(revenue),
-            calls=len([a for a in activities if a.type == ActivityType.CALL]),
-            meetings=len([a for a in activities if a.type == ActivityType.MEETING]),
-            proposals=len([a for a in activities if a.type == ActivityType.PROPOSAL]),
-            leads_won=len(won_leads),
-            leads_lost=len(lost_leads)
+            calls=act_counts.get(ActivityType.CALL.value, 0),
+            meetings=act_counts.get(ActivityType.MEETING.value, 0),
+            proposals=act_counts.get(ActivityType.PROPOSAL.value, 0),
+            leads_won=won_leads,
+            leads_lost=lost_leads
         )
         
-        total_closed = len(won_leads) + len(lost_leads)
+        total_closed = won_leads + lost_leads
         if total_closed > 0:
-            stats.conversion_rate = (len(won_leads) / total_closed) * 100
+            stats.conversion_rate = (won_leads / total_closed) * 100
             
         return stats
 
@@ -210,3 +232,108 @@ class AnalyticsService:
         }
 
         return result
+
+    @staticmethod
+    async def get_action_center_data(user: User) -> dict:
+        """
+        Aggregates tasks, leads needing attention, and notifications.
+        Role-based:
+        - Manager: Unassigned leads, team-wide overdue tasks.
+        - Team Member: Assigned overdue tasks, inactive leads (>4 days).
+        """
+        from ..models import CRMTask, Lead, CRMNotification, TaskStatus
+        from datetime import datetime, timezone, timedelta
+        
+        now = datetime.now(timezone.utc)
+        actions = []
+        is_manager = user.role in ["admin", "super_admin", "manager"]
+        
+        # 1. Tasks section
+        task_filters = [CRMTask.status == TaskStatus.PENDING]
+        if not is_manager:
+            task_filters.append(CRMTask.assigned_to_id == user.id)
+            
+        pending_tasks = await CRMTask.find(*task_filters).to_list()
+        for task in pending_tasks:
+            is_overdue = task.due_date and task.due_date < now
+            severity = "high" if is_overdue else "medium"
+            actions.append({
+                "id": str(task.id),
+                "title": task.title,
+                "description": task.description,
+                "type": "task",
+                "severity": severity,
+                "due_date": task.due_date.isoformat() if task.due_date else None,
+                "link": f"/leads/{task.lead_id}?tab=tasks",
+                "metadata": {"lead_id": str(task.lead_id)}
+            })
+
+        # 2. Leads section
+        if is_manager:
+            # Unassigned leads for managers
+            unassigned_leads = await Lead.find(Lead.assigned_to_id == None).to_list()
+            for lead in unassigned_leads:
+                actions.append({
+                    "id": str(lead.id),
+                    "title": f"Assign Lead: {lead.company_name}",
+                    "description": f"Lead from {lead.source} needs an owner.",
+                    "type": "lead_assignment",
+                    "severity": "high",
+                    "due_date": lead.created_at.isoformat(),
+                    "link": f"/leads/{lead.id}",
+                    "metadata": {"source": lead.source}
+                })
+        else:
+            # Inactive leads for team members (>4 days)
+            four_days_ago = now - timedelta(days=4)
+            inactive_leads = await Lead.find(
+                Lead.assigned_to_id == user.id,
+                Lead.last_activity_at < four_days_ago,
+                Lead.stage != "won",
+                Lead.stage != "lost"
+            ).to_list()
+            
+            for lead in inactive_leads:
+                actions.append({
+                    "id": str(lead.id),
+                    "title": f"Stale Lead: {lead.company_name}",
+                    "description": "No activity recorded in over 4 days. Reach out now.",
+                    "type": "inactive_lead",
+                    "severity": "medium",
+                    "due_date": lead.last_activity_at.isoformat(),
+                    "link": f"/leads/{lead.id}",
+                    "metadata": {"last_activity": lead.last_activity_at.isoformat()}
+                })
+
+        # 3. Notifications section (Unread)
+        notifications = await CRMNotification.find(
+            CRMNotification.user_id == user.id,
+            CRMNotification.is_read == False
+        ).sort(-CRMNotification.created_at).limit(10).to_list()
+        
+        for n in notifications:
+            actions.append({
+                "id": str(n.id),
+                "title": n.title,
+                "description": n.message,
+                "type": "notification",
+                "severity": "low",
+                "due_date": n.created_at.isoformat(),
+                "link": n.link,
+                "metadata": {"notif_type": n.type}
+            })
+
+        # Sort by severity then date
+        severity_map = {"high": 0, "medium": 1, "low": 2}
+        actions.sort(key=lambda x: (severity_map.get(x["severity"], 3), x["due_date"] or ""))
+
+        return {
+            "actions": actions,
+            "counts": {
+                "high": len([a for a in actions if a["severity"] == "high"]),
+                "medium": len([a for a in actions if a["severity"] == "medium"]),
+                "low": len([a for a in actions if a["severity"] == "low"]),
+                "total": len(actions)
+            },
+            "role": user.role
+        }

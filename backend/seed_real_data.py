@@ -73,18 +73,23 @@ async def seed_real_data():
 
         # 3. Users
         logger.info("Seeding Users...")
+        
+        from .config import settings
+        
         team_members = [
-            ("admin@antigravity.ai", "Admin", "User", UserRole.ADMIN),
+            (settings.ADMIN_USERNAME, "System", "Admin", UserRole.SUPER_ADMIN),
             ("sarah.mkt@antigravity.ai", "Sarah", "Market", UserRole.TEAM_MEMBER),
             ("david.sales@antigravity.ai", "David", "Sales", UserRole.SALES_LEAD),
         ]
+        
         user_entities = {}
         for email, fname, lname, role in team_members:
             u = await User.find_one(User.email == email)
             if not u:
+                password = settings.ADMIN_PASSWORD if role == UserRole.SUPER_ADMIN else "password123"
                 u = User(
                     email=email,
-                    hashed_password=get_password_hash("password123"),
+                    hashed_password=get_password_hash(password),
                     first_name=fname,
                     last_name=lname,
                     is_active=True,
@@ -128,7 +133,7 @@ async def seed_real_data():
         logger.info("Seeding Campaigns...")
         c_names = ["SaaS Outreach 2026", "Webinar Lifecycle"]
         campaigns_dict = {}
-        admin_user = user_entities[UserRole.ADMIN.value]
+        admin_user = user_entities[UserRole.SUPER_ADMIN.value]
         for cname in c_names:
             c = await Campaign.find_one(Campaign.name == cname)
             if not c:

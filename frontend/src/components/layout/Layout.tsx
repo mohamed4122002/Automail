@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Sidebar } from "./Sidebar";
 import { Navbar } from "./Navbar";
+import GlobalSearch from "../dashboard/GlobalSearch";
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -13,6 +14,7 @@ const Layout: React.FC<LayoutProps> = ({ children, title }) => {
   return (
     <div className="min-h-screen bg-slate-950">
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+      <GlobalSearch />
 
       <div className="flex flex-col min-h-screen md:pl-64 transition-all duration-300">
         <Navbar onMenuClick={() => setSidebarOpen(true)} title={title} />

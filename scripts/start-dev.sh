@@ -15,7 +15,7 @@ echo "✓ Docker is running"
 echo ""
 
 # Start infrastructure with Docker Compose
-echo "📦 Starting infrastructure (PostgreSQL, Redis, Backend, Celery Worker, Celery Beat)..."
+echo "📦 Starting infrastructure (MongoDB, Redis, Backend, Celery Worker, Celery Beat)..."
 docker-compose up -d
 
 if [ $? -ne 0 ]; then
@@ -38,7 +38,7 @@ echo ""
 echo "📋 Service URLs:"
 echo "   - Backend API: http://localhost:8000"
 echo "   - API Docs: http://localhost:8000/docs"
-echo "   - PostgreSQL: localhost:5432"
+echo "   - MongoDB: localhost:27017"
 echo "   - Redis: localhost:6379"
 echo ""
 echo "🔧 Useful Commands:"
