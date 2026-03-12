@@ -67,3 +67,16 @@ class ActionCenterResponse(BaseModel):
     actions: List[ActionCenterItem]
     counts: Dict[str, int]
     role: str
+
+class ReputationMetrics(BaseModel):
+    total_emails_sent: int = 0
+    open_rate: float = 0.0
+    click_rate: float = 0.0
+    bounce_rate: float = 0.0
+    unsubscribe_rate: float = 0.0
+
+class ReputationResponse(BaseModel):
+    score: int
+    status: str
+    metrics: ReputationMetrics
+    warnings: List[str] = Field(default_factory=list)

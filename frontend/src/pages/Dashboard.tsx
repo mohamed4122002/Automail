@@ -110,7 +110,7 @@ const Dashboard: React.FC = () => {
       if (selectedWorkflow) params.append('workflow_id', selectedWorkflow);
       if (selectedCampaign) params.append('campaign_id', selectedCampaign);
 
-      const response = await api.get(`/ analytics / dashboard ? ${params.toString()} `);
+      const response = await api.get(`/analytics/dashboard?${params.toString()}`);
       return response.data;
     }
   });
@@ -269,7 +269,7 @@ const Dashboard: React.FC = () => {
                       Just Clicked
                     </span>
                     <Link
-                      to={`/ users / ${hotLead.user_id} `}
+                      to={`/users/${hotLead.user_id}`}
                       className="text-[10px] text-white underline hover:text-emerald-300 font-bold uppercase tracking-wider"
                     >
                       View Lead →

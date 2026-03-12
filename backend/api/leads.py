@@ -35,6 +35,38 @@ class PipelineSummaryResponse(BaseModel):
     stages: List[PipelineStageSummary]
     totals_by_currency: Dict[str, float]
 
+class LeadProjection(BaseModel):
+    id: UUID = Field(alias="_id")
+    company_name: str
+    source: str
+    stage: str
+    assigned_to_id: Optional[UUID] = None
+    assigned_by_id: Optional[UUID] = None
+    lead_status: str
+    lead_score: int
+    deal_value: float = 0.0
+    deal_currency: str = "USD"
+    organization_id: Optional[UUID] = None
+    last_activity_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    claimed_at: Optional[datetime] = None
+    last_contacted_at: Optional[datetime] = None
+    last_email_opened_at: Optional[datetime] = None
+    last_link_clicked_at: Optional[datetime] = None
+    is_claimable: bool = False
+    assignment_type: Optional[str] = None
+    proposal_deadline: Optional[datetime] = None
+    deadline_reminder_sent: bool = False
+
+class LeadShortProjection(BaseModel):
+    id: UUID = Field(alias="_id")
+    company_name: str
+
+class LeadStatsProjection(BaseModel):
+    stage: str
+    lead_status: str
+
 @router.get("/pipeline-summary", response_model=PipelineSummaryResponse)
 async def get_pipeline_summary(
     user_id: UUID = Depends(get_current_user_id),
@@ -220,13 +252,7 @@ async def get_my_leads(
     if search:
         query.append(Lead.company_name == re.compile(search, re.IGNORECASE))
 
-    leads = await Lead.find(*query).sort("-last_activity_at").project(
-        "_id", "company_name", "source", "stage", "assigned_to_id", "assigned_by_id", 
-        "lead_status", "lead_score", "deal_value", "deal_currency", "organization_id",
-        "last_activity_at", "created_at", "updated_at", "claimed_at", "last_contacted_at",
-        "last_email_opened_at", "last_link_clicked_at", "is_claimable", "assignment_type",
-        "proposal_deadline", "deadline_reminder_sent"
-    ).to_list()
+    leads = await Lead.find(*query).sort("-last_activity_at").project(LeadProjection).to_list()
     return await _build_lead_responses(leads)
 
 
@@ -240,19 +266,7 @@ async def get_lead_pool(
     if search:
         query.append(Lead.company_name == re.compile(search, re.IGNORECASE))
 
-    leads = await Lead.find(*query).sort("-created_at").project(
-        "_id", "company_name", "source", "stage", "assigned_to_id", "assigned_by_id", 
-        "lead_status", "lead_score", "deal_value", "deal_currency", "organization_id",
-        "last_activity_at", "created_at", "updated_at", "claimed_at", "last_contacted_at",
-        "last_email_opened_at", "last_link_clicked_at", "is_claimable", "assignment_type",
-        "proposal_deadline", "deadline_reminder_sent"
-    ).project(
-        "_id", "company_name", "source", "stage", "assigned_to_id", "assigned_by_id", 
-        "lead_status", "lead_score", "deal_value", "deal_currency", "organization_id",
-        "last_activity_at", "created_at", "updated_at", "claimed_at", "last_contacted_at",
-        "last_email_opened_at", "last_link_clicked_at", "is_claimable", "assignment_type",
-        "proposal_deadline", "deadline_reminder_sent"
-    ).to_list()
+    leads = await Lead.find(*query).sort("-created_at").project(LeadProjection).to_list()
     return await _build_lead_responses(leads)
 
 
@@ -316,7 +330,7 @@ async def get_overdue_tasks(
     lead_ids = list({t.lead_id for t in tasks if t.lead_id})
     leads_map = {}
     if lead_ids:
-        leads = await Lead.find(In(Lead.id, lead_ids)).project("_id", "company_name").to_list()
+        leads = await Lead.find(In(Lead.id, lead_ids)).project(LeadShortProjection).to_list()
         leads_map = {l.id: l.company_name for l in leads}
 
     results = []
@@ -472,7 +486,7 @@ async def get_lead_stats(
         return LeadStatsResponse(**cached)
     # ───────────────────────────────────────────────────────────────────────
 
-    leads = await Lead.find_all().project("stage", "lead_status").to_list()
+    leads = await Lead.find_all().project(LeadStatsProjection).to_list()
     
     stage_counts = {}
     status_counts = {}

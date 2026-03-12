@@ -3,6 +3,24 @@ from uuid import UUID
 from datetime import datetime
 from ..models import Campaign, EmailSend, Event, EventTypeEnum, User, Workflow
 from ..schemas.campaigns import CampaignList, CampaignDetail, CampaignStats, Recipient
+from pydantic import Field, BaseModel
+
+class CampaignProjection(BaseModel):
+    id: UUID = Field(alias="_id")
+    name: str
+    owner_id: UUID
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+class EmailSendProjection(BaseModel):
+    id: UUID = Field(alias="_id")
+    user_id: UUID
+    created_at: datetime
+
+class UserProjection(BaseModel):
+    id: UUID = Field(alias="_id")
+    email: str
 
 class CampaignService:
     def __init__(self):
@@ -10,22 +28,22 @@ class CampaignService:
 
     async def list_campaigns(self, owner_id: UUID) -> list[CampaignList]:
         campaigns = await Campaign.find(Campaign.owner_id == owner_id)\
-            .project("name", "owner_id", "is_active", "created_at", "updated_at")\
+            .project(CampaignProjection)\
             .sort("-created_at").to_list()
         
         results = []
         for c in campaigns:
-            c_id = c.get("_id")
+            c_id = c.id
             stats = await self._calculate_campaign_stats(c_id)
             results.append(CampaignList(
                 id=c_id,
-                name=c.get("name"),
-                owner_id=c.get("owner_id"),
-                status="active" if c.get("is_active") else "paused",
-                date=c.get("created_at").strftime("%Y-%m-%d"),
+                name=c.name,
+                owner_id=c.owner_id,
+                status="active" if c.is_active else "paused",
+                date=c.created_at.strftime("%Y-%m-%d"),
                 stats=stats,
-                created_at=c.get("created_at"),
-                updated_at=c.get("updated_at")
+                created_at=c.created_at,
+                updated_at=c.updated_at
             ))
         return results
 
@@ -107,22 +125,22 @@ class CampaignService:
 
     async def _get_recipients(self, campaign_id: UUID, limit: int = 50) -> list[Recipient]:
         email_sends = await EmailSend.find(EmailSend.campaign_id == campaign_id)\
-            .project("user_id", "created_at")\
+            .project(EmailSendProjection)\
             .sort("-created_at").limit(limit).to_list()
         
         # Optimize by fetching all users at once
-        user_ids = [send.get("user_id") for send in email_sends if send.get("user_id")]
+        user_ids = [send.user_id for send in email_sends if send.user_id]
         users = await User.find({"_id": {"$in": user_ids}})\
-            .project("email")\
+            .project(UserProjection)\
             .to_list()
-        user_map = {u.get("_id"): u for u in users}
+        user_map = {u.id: u for u in users}
         
         recipients = []
         for send in email_sends:
-            user = user_map.get(send.get("user_id"))
+            user = user_map.get(send.user_id)
             if not user: continue
             
-            send_id = send.get("_id")
+            send_id = send.id
             events = await Event.find(Event.email_send_id == send_id).sort("-created_at").to_list()
             
             status = "sent"
@@ -137,12 +155,12 @@ class CampaignService:
                 time_diff = datetime.utcnow() - latest_event.created_at
                 last_activity = self._format_time_diff(time_diff)
             else:
-                time_diff = datetime.utcnow() - send.get("created_at")
+                time_diff = datetime.utcnow() - send.created_at
                 last_activity = "Sent " + self._format_time_diff(time_diff)
                 
             recipients.append(Recipient(
-                id=str(user.get("_id")),
-                email=user.get("email"),
+                id=str(user.id),
+                email=user.email,
                 status=status,
                 last_activity=last_activity
             ))

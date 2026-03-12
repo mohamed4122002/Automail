@@ -4,102 +4,94 @@ from typing import List, Dict, Any, Optional
 from uuid import UUID
 from datetime import datetime
 from ..api.deps import get_current_user_id, get_current_user
-from ..schemas.analytics import ActionCenterResponse
-from ..models import Lead, CRMLeadStage, Organization, CRMActivity, ActivityType, UserRole, User
+from ..schemas.analytics import ActionCenterResponse, TargetProgress
+from ..models import Lead, CRMLeadStage, Organization, CRMActivity, ActivityType, UserRole, User, Event, EventTypeEnum
 from ..cache import cache_get, cache_set, delete_cache
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
-# ─── Revenue Forecasting ───────────────────────────────────────────────────
+# ─── CRM Target Progress ──────────────────────────────────────────────────
 
-class ForecastStage(BaseModel):
-    stage: str
-    raw_value: float
-    weighted_value: float
-    count: int
-
-class RevenueForecastResponse(BaseModel):
-    stages: List[ForecastStage]
-    total_raw: float
-    total_weighted: float
-    currency: str = "USD"
-
-STAGE_WEIGHTS = {
-    CRMLeadStage.LEAD: 0.10,
-    CRMLeadStage.CALL: 0.25,
-    CRMLeadStage.MEETING: 0.50,
-    CRMLeadStage.PROPOSAL: 0.75,
-    CRMLeadStage.NEGOTIATION: 0.90,
-    CRMLeadStage.WON: 1.0,
-    CRMLeadStage.PROJECT: 1.0,
-    CRMLeadStage.LOST: 0.0
-}
-
-@router.get("/admin/revenue-forecast", response_model=RevenueForecastResponse)
-async def get_revenue_forecast(
+@router.get("/targets", response_model=TargetProgress)
+async def get_target_progress(
+    month: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
     """
-    Weighted revenue forecast based on lead stages.
-    Restricted to Admins/Managers. Cached for 120 s.
+    Get progress against CRM targets for the current month.
     """
+    from ..services.analytics import AnalyticsService
+    if not month:
+        month = datetime.utcnow().strftime("%Y-%m")
+        
+    user_id = None
     if current_user.role not in [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.MANAGER]:
-        raise HTTPException(status_code=403, detail="Analytics restricted to management.")
+        user_id = current_user.id
+        
+    return await AnalyticsService.get_target_progress(month, user_id)
 
-    # ── Cache ──────────────────────────────────────────────────────────────
-    CACHE_KEY = "analytics:revenue_forecast"
-    cached = await cache_get(CACHE_KEY)
-    if cached:
-        return RevenueForecastResponse(**cached)
-    # ───────────────────────────────────────────────────────────────────────
+# ─── Sender Reputation ─────────────────────────────────────────────────────
 
-    # use aggregation to let Mongo handle the grouping logic
-    agg_pipeline = [
-        {"$project": {"stage": 1, "deal_value": {"$ifNull": ["$deal_value", 0]}}},
-        {"$group": {
-            "_id": "$stage",
-            "count": {"$sum": 1},
-            "raw": {"$sum": "$deal_value"}
-        }}
-    ]
-    raw_results = await Lead.get_motor_collection().aggregate(agg_pipeline).to_list(length=None)
+@router.get("/reputation")
+async def get_reputation(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get sender reputation metrics and status.
+    """
+    # In a real implementation, this would aggregate from metrics
+    # For now, we calculate from recent events or mock
+    total_sent = await Event.find(Event.type == EventTypeEnum.SENT).count()
+    if total_sent == 0:
+        return {
+            "score": 100,
+            "status": "EXCELLENT",
+            "metrics": {
+                "total_emails_sent": 0,
+                "open_rate": 0,
+                "click_rate": 0,
+                "bounce_rate": 0,
+                "unsubscribe_rate": 0
+            },
+            "warnings": []
+        }
 
-    stage_data: Dict[str, Dict[str, float]] = {}
-    total_raw = 0.0
-    total_weighted = 0.0
+    bounced = await Event.find(Event.type == EventTypeEnum.BOUNCED).count()
+    opened = await Event.find(Event.type == EventTypeEnum.OPENED).count()
+    clicked = await Event.find(Event.type == EventTypeEnum.CLICKED).count()
+    unsubbed = await Event.find(Event.type == EventTypeEnum.UNSUBSCRIBED).count()
 
-    for entry in raw_results:
-        stage_val = entry.get("_id")
-        count = entry.get("count", 0)
-        raw_val = float(entry.get("raw", 0))
-        weight = STAGE_WEIGHTS.get(stage_val, 0.0)
-        weighted_val = raw_val * weight
+    bounce_rate = round((bounced / total_sent * 100), 1)
+    open_rate = round((opened / total_sent * 100), 1)
+    click_rate = round((clicked / total_sent * 100), 1)
+    unsub_rate = round((unsubbed / total_sent * 100), 1)
 
-        stage_str = stage_val.value if hasattr(stage_val, "value") else str(stage_val)
-        stage_data[stage_str] = {"raw": raw_val, "weighted": weighted_val, "count": count}
+    score = 100 - (bounce_rate * 5) - (unsub_rate * 10)
+    score = max(0, min(100, int(score)))
 
-        total_raw += raw_val
-        total_weighted += weighted_val
+    status = "EXCELLENT"
+    if score < 50: status = "POOR"
+    elif score < 75: status = "GOOD"
+    elif score < 90: status = "GREAT"
 
-    # sort by CRMLeadStage enum order
-    order = [s.value for s in CRMLeadStage]
-    sorted_stages = []
-    for s_name in order:
-        if s_name in stage_data:
-            sorted_stages.append(ForecastStage(
-                stage=s_name,
-                raw_value=stage_data[s_name]["raw"],
-                weighted_value=stage_data[s_name]["weighted"],
-                count=stage_data[s_name]["count"]
-            ))
+    warnings = []
+    if bounce_rate > 5:
+        warnings.append("High bounce rate detected. Clean your lead lists.")
+    if unsub_rate > 2:
+        warnings.append("Unsubscribe rate is above average. Review your content.")
 
-    response = RevenueForecastResponse(
-        stages=sorted_stages,
-        total_raw=total_raw,
-        total_weighted=total_weighted
-    )
-    await cache_set(CACHE_KEY, response.model_dump(), ttl=120)
-    return response
+    return {
+        "score": score,
+        "status": status,
+        "metrics": {
+            "total_emails_sent": total_sent,
+            "open_rate": open_rate,
+            "click_rate": click_rate,
+            "bounce_rate": bounce_rate,
+            "unsubscribe_rate": unsub_rate
+        },
+        "warnings": warnings
+    }
 
 # ─── Organization Summary ──────────────────────────────────────────────────
 
@@ -148,7 +140,10 @@ async def get_org_summary(
         won_deal_value += won
 
     # last_activity_at still requires a separate query to find the max
-    last_doc = await Lead.find(Lead.organization_id == org_id).sort("-last_activity_at").project("last_activity_at").limit(1).to_list()
+    class LeadActivityProjection(BaseModel):
+        last_activity_at: Optional[datetime] = None
+
+    last_doc = await Lead.find(Lead.organization_id == org_id).sort("-last_activity_at").project(LeadActivityProjection).limit(1).to_list()
     if last_doc and hasattr(last_doc[0], "last_activity_at"):
         last_activity_at = last_doc[0].last_activity_at
 
@@ -159,6 +154,7 @@ async def get_org_summary(
         last_activity_at=last_activity_at,
         stage_breakdown=stage_breakdown
     )
+    return summary
         
 @router.get("/dashboard")
 async def get_dashboard(

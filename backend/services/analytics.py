@@ -337,3 +337,73 @@ class AnalyticsService:
             },
             "role": user.role
         }
+
+    @staticmethod
+    async def get_reputation_stats(user_id: Optional[UUID] = None) -> dict:
+        """
+        Calculates sender reputation based on email activity.
+        """
+        from ..models import EmailSend, Event
+        
+        # Base filters
+        send_filters = []
+        event_filters = []
+        if user_id:
+            send_filters.append(EmailSend.user_id == user_id)
+            event_filters.append(Event.user_id == user_id)
+
+        # 1. Gather metrics
+        total_sent = await EmailSend.find(*send_filters, EmailSend.status == "sent").count()
+        total_opened = await Event.find(*event_filters, Event.type == "opened").count()
+        total_clicked = await Event.find(*event_filters, Event.type == "clicked").count()
+        total_bounced = await Event.find(*event_filters, Event.type == "bounced").count()
+        total_unsubscribed = await Event.find(*event_filters, Event.type == "unsubscribed").count()
+
+        # 2. Calculate rates
+        open_rate = round((total_opened / total_sent * 100), 1) if total_sent > 0 else 0.0
+        click_rate = round((total_clicked / total_sent * 100), 1) if total_sent > 0 else 0.0
+        bounce_rate = round((total_bounced / total_sent * 100), 1) if total_sent > 0 else 0.0
+        unsubscribe_rate = round((total_unsubscribed / total_sent * 100), 1) if total_sent > 0 else 0.0
+
+        # 3. Calculate score (Simplified algorithm)
+        # Perfect score 100
+        score = 85 # Base
+        
+        # Bonuses
+        if open_rate > 20: score += 5
+        if click_rate > 5: score += 5
+        
+        # Penalties
+        score -= (bounce_rate * 5)
+        score -= (unsubscribe_rate * 10)
+        
+        # Range cap
+        score = max(0, min(100, int(score)))
+        
+        # Status
+        status = "Excellent"
+        if score < 70: status = "Good"
+        if score < 50: status = "Fair"
+        if score < 30: status = "Poor"
+
+        # Warnings
+        warnings = []
+        if bounce_rate > 2.0:
+            warnings.append(f"High bounce rate ({bounce_rate}%). Clean your list to avoid blacklisting.")
+        if unsubscribe_rate > 1.0:
+            warnings.append(f"High unsubscribe rate ({unsubscribe_rate}%). Your content may be irrelevant.")
+        if score < 50:
+            warnings.append("Low reputation detected. Deliverability is at risk.")
+
+        return {
+            "score": score,
+            "status": status,
+            "metrics": {
+                "total_emails_sent": total_sent,
+                "open_rate": open_rate,
+                "click_rate": click_rate,
+                "bounce_rate": bounce_rate,
+                "unsubscribe_rate": unsubscribe_rate
+            },
+            "warnings": warnings
+        }

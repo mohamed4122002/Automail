@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from uuid import UUID, uuid4
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import liquid
 
 from ..models import EmailTemplate
@@ -36,6 +36,11 @@ class PreviewRequest(BaseModel):
 class PreviewResponse(BaseModel):
     rendered_html: str
 
+class TemplateProjection(BaseModel):
+    id: UUID = Field(alias="_id")
+    name: str
+    subject: str
+
 @router.get("", response_model=List[TemplateResponse])
 async def list_templates(
     user_id: UUID = Depends(get_current_user_id)
@@ -48,7 +53,7 @@ async def list_templates(
     pressure for large template collections.
     """
     # note: Beanie's `project` accepts field names or class attributes
-    return await EmailTemplate.find_all().project("_id", "name", "subject").to_list()
+    return await EmailTemplate.find_all().project(TemplateProjection).to_list()
 
 @router.get("/{template_id}", response_model=TemplateResponse)
 async def get_template(
